@@ -11,12 +11,14 @@ import { registerBillingInvoiceRoutes } from './billing-invoices/routes.js';
 import { registerOrderRoutes } from './orders/routes.js';
 import { registerTripRoutes } from './trips/routes.js';
 import { isAuthorizedServiceRequest } from './auth.js';
+import { registerSchemaRoutes } from './schema/routes.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
     replica: ReplicaPool;
     analyticsGate: AnalyticsGate;
     vehicleSafety: AppConfig['safety'];
+    schemaDatabase: string;
   }
 }
 
@@ -33,6 +35,7 @@ export function buildApp(config: AppConfig, poolFactory = createReplicaPool, opt
   app.decorate('replica', pool);
   app.decorate('analyticsGate', new AnalyticsGate(config.safety.analyticsConcurrency, config.safety.analyticsQueueLimit, config.safety.analyticsQueueTimeoutMs));
   app.decorate('vehicleSafety', config.safety);
+  app.decorate('schemaDatabase', config.replica.database);
   app.addHook('onRequest', async (request, reply) => {
     if (request.raw.url && request.raw.url.length > config.safety.maxRequestUrlLength) {
       return reply.code(400).send(apiErrorBody(new ApiError(400, 'INVALID_QUERY', 'Invalid vehicle query')));
@@ -65,5 +68,6 @@ export function buildApp(config: AppConfig, poolFactory = createReplicaPool, opt
   app.register(registerCustomerRoutes);
   app.register(registerInvoiceRoutes);
   app.register(registerDocumentRoutes);
+  app.register(registerSchemaRoutes);
   return app;
 }

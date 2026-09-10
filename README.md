@@ -75,6 +75,54 @@ curl "http://localhost:3000/api/invoices?tripId=313"
 curl "http://localhost:3000/api/documents?tripId=313"
 ```
 
+## Schema discovery
+
+The authenticated `/schema/*` API is an investigation aid for ERP developers.
+It exposes only `INFORMATION_SCHEMA` metadata from the configured replica: it
+never accepts SQL, reads business-table rows, or returns credentials, grants, or
+connection configuration. It shares the replica statement timeout and bounded
+analytics concurrency gate used by other analytical reads.
+
+`GET /schema/tables` lists tables and views as `{ data, meta }`. `page` defaults
+to 1 and `per_page` defaults to 50 (maximum 100); each item has `name`, `type`,
+and `approximate_row_count` (MariaDB's `TABLE_ROWS` estimate). `meta.complete`
+is false when subsequent pages remain.
+
+```bash
+curl -H "Authorization: Bearer $ERP_ANALYTICS_API_TOKEN" \
+  'http://127.0.0.1:3000/schema/tables?per_page=50'
+```
+
+`GET /schema/search?q=invoice` requires exactly one non-empty query string of at
+most 100 characters. It searches only table and column names and returns matching
+tables with `matching_columns`; results are capped at 100 tables. `meta` includes
+`result_count` and `complete`, which is false whenever the search cap truncates
+the response.
+
+```bash
+curl -H "Authorization: Bearer $ERP_ANALYTICS_API_TOKEN" \
+  'http://127.0.0.1:3000/schema/search?q=invoice'
+```
+
+`GET /schema/tables/:table` first confirms the exact table name in
+`INFORMATION_SCHEMA.TABLES`, then returns its type, approximate row count,
+columns (including type/null/default/PK/auto-increment metadata), indexes, and
+available foreign keys. Unknown names return 404. Detail collections are each
+bounded to 500 metadata rows; `meta.columns_complete`, `meta.indexes_complete`,
+and `meta.foreign_keys_complete` report each collection's completeness.
+Arbitrary string column defaults are redacted (`default: null`,
+`default_redacted: true`) so a schema default cannot disclose a secret.
+
+```bash
+curl -H "Authorization: Bearer $ERP_ANALYTICS_API_TOKEN" \
+  'http://127.0.0.1:3000/schema/tables/invoices'
+```
+
+MariaDB 10.3's `TABLE_ROWS` is an engine-maintained estimate, especially for
+InnoDB; it is not a transactionally exact count. Foreign-key metadata is present
+only for declared constraints (implicit application-level relationships cannot be
+discovered), and index prefix/expression details are not included in this MVP.
+
 ## Vehicles
 
 `GET /vehicles` returns `{ data, meta }`. Supported filters are `plate_number`
