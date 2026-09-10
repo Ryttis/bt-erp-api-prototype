@@ -1,20 +1,34 @@
-import Fastify from "fastify";
+import { buildApp } from './app.js';
+import { ConfigurationError, loadConfig } from './config.js';
+import { checkReplicaConnectivity } from './db/replica.js';
 
-import { registerCustomerRoutes } from "./customers/routes.js";
-import { registerDocumentRoutes } from "./documents/routes.js";
-import { registerInvoiceRoutes } from "./invoices/routes.js";
-import { registerOrderRoutes } from "./orders/routes.js";
-import { registerTripRoutes } from "./trips/routes.js";
+async function start() {
+  const config = loadConfig();
+  const app = buildApp(config);
+  let closing = false;
+  const shutdown = async () => {
+    if (closing) return;
+    closing = true;
+    try {
+      await app.close();
+    } catch {
+      app.log.error('Application shutdown failed');
+      process.exitCode = 1;
+    }
+  };
+  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', shutdown);
+  try {
+    await checkReplicaConnectivity(app.replica);
+    if (!closing) await app.listen({ host: '0.0.0.0', port: config.port });
+  } catch {
+    app.log.error('Application startup failed; check replica connectivity and server configuration');
+    process.exitCode = 1;
+    await shutdown();
+  }
+}
 
-const app = Fastify({ logger: true });
-const port = Number(process.env.PORT ?? 3000);
-
-app.get("/health", async () => ({ status: "ok" }));
-
-await app.register(registerTripRoutes);
-await app.register(registerOrderRoutes);
-await app.register(registerCustomerRoutes);
-await app.register(registerInvoiceRoutes);
-await app.register(registerDocumentRoutes);
-
-await app.listen({ host: "0.0.0.0", port });
+start().catch((error: unknown) => {
+  console.error(error instanceof ConfigurationError ? error.message : 'Application initialization failed');
+  process.exitCode = 1;
+});

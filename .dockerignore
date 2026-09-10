@@ -1,0 +1,9 @@
+.env
+.git
+.idea
+node_modules
+dist
+tests
+docs
+*.zip
+npm-debug.log*
