@@ -12,6 +12,7 @@ import { registerOrderRoutes } from './orders/routes.js';
 import { registerTripRoutes } from './trips/routes.js';
 import { isAuthorizedServiceRequest } from './auth.js';
 import { registerSchemaRoutes } from './schema/routes.js';
+import { registerFixedCostRoutes } from './fixed-costs/routes.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -69,5 +70,6 @@ export function buildApp(config: AppConfig, poolFactory = createReplicaPool, opt
   app.register(registerInvoiceRoutes);
   app.register(registerDocumentRoutes);
   app.register(registerSchemaRoutes);
+  app.register(registerFixedCostRoutes);
   return app;
 }
