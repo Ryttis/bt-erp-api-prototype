@@ -45,6 +45,11 @@ export function parseFixedCostDiagnosticTaskIds(value: unknown): FixedCostDiagno
 }
 
 const comparison = ['both_missing', 'left_missing', 'right_missing', 'equal', 'different'] as const;
+// Sign classes only: no magnitude ranges, tolerances or business meaning.
+const valueClass = ['missing', 'negative', 'zero', 'positive'] as const;
+const dateState = ['missing', 'zero_date', 'valid_date', 'other'] as const;
+// Relative to the summary date columns; neither date is treated as authoritative.
+const detailDate = ['no_details', 'unclassified', 'summary_date_unusable', 'detail_date_unusable', 'all_equal', 'none_equal', 'mixed'] as const;
 export const fixedCostDiagnosticCategories = {
   task: ['present', 'missing'],
   summary: ['present', 'missing'],
@@ -55,6 +60,18 @@ export const fixedCostDiagnosticCategories = {
   assignedTruck: ['missing', 'zero', 'populated_with_master', 'populated_without_master'],
   details: ['present', 'missing'],
   detailCardinality: ['zero', 'one', 'multiple', 'over_limit'],
+  // Slice 3A: characterize the observed differences without selecting a value.
+  taskLockedTotals: comparison,
+  taskTruckValue: valueClass,
+  summaryCurrentValue: valueClass,
+  summaryLockedValue: valueClass,
+  // Raw tinyint(1) flag state; the meaning of `deleted` is unapproved.
+  summaryDeletedFlag: ['missing', 'zero', 'one', 'other'],
+  summaryCurrentDate: dateState,
+  summaryLockedDate: dateState,
+  currentLockedDate: ['both_missing', 'left_missing', 'right_missing', 'equal', 'current_before_locked', 'current_after_locked', 'unclassified'],
+  detailCurrentDate: detailDate,
+  detailLockedDate: detailDate,
 } as const;
 
 export type FixedCostDiagnosticCategories = {

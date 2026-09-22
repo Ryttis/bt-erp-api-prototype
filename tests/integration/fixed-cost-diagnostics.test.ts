@@ -25,7 +25,14 @@ test('opt-in bounded truck fixed-cost diagnostics', {
       }
     }
     assert.ok(result.meta.complete === (counts.detailCardinality.over_limit === 0), 'Diagnostic completeness');
+    // Co-occurrence of allowlisted categories: counts per combined pattern, with no input position.
+    const patterns: Record<string, number> = {};
+    for (const row of result.data) {
+      const pattern = (Object.keys(fixedCostDiagnosticCategories) as (keyof typeof fixedCostDiagnosticCategories)[]).map(key => `${key}=${row[key]}`).join(';');
+      patterns[pattern] = (patterns[pattern] ?? 0) + 1;
+    }
     console.log('Fixed-cost diagnostic category counts', JSON.stringify({ sampleSize: result.meta.sampleSize, complete: result.meta.complete, counts }));
+    console.log('Fixed-cost diagnostic category patterns', JSON.stringify(patterns));
   } catch (error) {
     // Never let the test runner render a driver error, assertion payload or cause.
     throw new Error(error instanceof FixedCostDiagnosticError && error.code === 'QUERY_TIMEOUT'

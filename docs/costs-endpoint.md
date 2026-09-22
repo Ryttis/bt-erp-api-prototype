@@ -3,7 +3,7 @@
 **Project:** BT Finance Analyst
 **Repository:** `bt-erp-api-prototype`
 **Target path:** `docs/costs-endpoint.md`
-**Status:** Slices 1–2 implemented — production monetary semantics remain unverified
+**Status:** Slices 1, 2 and 3A implemented — production monetary semantics remain unverified; coding gate closed
 **Last updated:** 2026-09-22
 **Owner:** CDT / MP-8
 
@@ -146,6 +146,7 @@ The diagnostic capability is an internal repository exercised by an opt-in integ
 - [!] Check history matching: omitted; applicable date, interval boundaries and sentinel-date behavior are unverified.
 - [x] Report missing rows, unequal representations and master gaps with categories.
 - [x] Bound detail lookup to 100 entries plus one overflow sentinel; output only categories, input positions, sample size and completeness.
+- [x] Slice 3A: classify task/current/locked truck values by sign, the raw `deleted` flag, current/locked date states and relationships, and bounded detail-date equality against both summary dates. Categories only; see section 14.
 
 ### Phase F — Source and semantic decisions
 
@@ -254,6 +255,11 @@ Production monetary aggregation for a scope may be enabled only when all boxes b
 | FC-09 | Should trailer reporting use `uzdavinio_priekaba` or `uzd_pr_vaziavo`? | ERP/BA | Yes for trailer grouping | Open |
 | FC-10 | How are tasks attributed when historical department intervals overlap or are missing? | ERP/BA | Yes for department grouping | Open |
 | FC-11 | Which ERP report and closed period will be used for reconciliation? | Finance | Yes | Open |
+| FC-12 | What do `uzdaviniai.kastaiVilkiko`, `kastai_fiksuoti_ataskaita.kastaiVilkiko` and `locked_kastaiVilkiko` each represent? | ERP/BA | Yes | Open |
+| FC-13 | Are zero and negative truck fixed-cost amounts valid? | Finance/ERP | Yes | Open |
+| FC-14 | What reconciliation tolerance, if any, is acceptable? | Finance | Yes | Open |
+| FC-15 | Does one task belong to exactly one truck fixed-cost calculation? | ERP/BA | Yes | Open |
+| FC-16 | Which task date field, if any, participates in fixed-cost reporting? | Finance/BA | Yes | Open |
 
 ## 9. Reconciliation log
 
@@ -267,6 +273,8 @@ Production monetary aggregation for a scope may be enabled only when all boxes b
 |---|---|---|---|---|---|
 | 2026-09-22 | Slice 2 task/summary/master categories | `uzdaviniai`, `kastai_fiksuoti_ataskaita`, `masinos` | One parameter per statement; at most 20 inputs | PRIMARY / const / one estimated row per base table; full evidence in section 13 | Yes, internal diagnostic only |
 | 2026-09-22 | Slice 2 detail cardinality | `kastai_fiksuoti_vilkikai_det` | Task prefix; LIMIT 101 | PRIMARY / ref / Using index; derived scan bounded to 101 entries | Yes, internal diagnostic only |
+| 2026-09-22 | Slice 3A extended task/summary/master categories | `uzdaviniai`, `kastai_fiksuoti_ataskaita`, `masinos` | One parameter; at most 20 inputs | Unchanged: PRIMARY / const / one estimated row per base table; details in section 14 | Yes, internal diagnostic only |
+| 2026-09-22 | Slice 3A extended detail categories | `kastai_fiksuoti_vilkikai_det`, `kastai_fiksuoti_ataskaita` | Task prefix LIMIT 101 plus one summary PK row; two bound parameters | Detail PRIMARY / ref / Using index; summary PRIMARY / const; derived scan bounded to 101 entries | Yes, internal diagnostic only |
 
 ## 11. Test record
 
@@ -284,6 +292,11 @@ Production monetary aggregation for a scope may be enabled only when all boxes b
 | 2026-09-22 | Uncommitted Slice 2 review correction | `npm run typecheck` | Passed | Diagnostic SQL now uses static unqualified table names; the configured `ERP_REPLICA_DATABASE` selects the schema. |
 | 2026-09-22 | Uncommitted Slice 2 review correction | `npm test` | Passed | 71 unit tests passed; the diagnostic file now has nine tests, including a regression test rejecting any `infot_2.` or other schema qualifier in executed diagnostic SQL. A temporary reintroduced qualifier made that test fail before being reverted. |
 | 2026-09-22 | Uncommitted Slice 2 review correction | Targeted diagnostic integration, variable absent | Skipped | `FIXED_COST_DIAGNOSTIC_TASK_IDS` was not available; no live result is claimed for the corrected SQL. |
+| 2026-09-22 | `07067a9` (committed Slice 2) | Targeted diagnostic integration, private 20-task sample | Passed | Corrected unqualified SQL ran against the configured replica; `DATABASE()` matched `ERP_REPLICA_DATABASE`. Category counts identical to the earlier Slice 2 evidence. |
+| 2026-09-22 | Uncommitted Slice 3A over `07067a9` | `npm run typecheck` | Passed | |
+| 2026-09-22 | Uncommitted Slice 3A | `npm test` | Passed | 71 unit tests; the diagnostic file's nine tests cover the extended SQL allowlist, two-parameter detail binding, the new category allowlists, malformed/raw driver values failing closed, dropped extra fields and sanitized errors. Mutations removing the detail `LIMIT` or qualifying the new summary join were each caught. |
+| 2026-09-22 | Uncommitted Slice 3A | Targeted diagnostic integration, private 20-task sample | Passed | Aggregate category and pattern counts only, recorded in section 14. |
+| 2026-09-22 | Uncommitted Slice 3A | `npm run test:integration` | Passed | Seven live tests passed; diagnostic test skipped because its opt-in variable was absent. Only pass/fail lines were displayed. |
 
 ## 12. Change log
 
@@ -293,6 +306,7 @@ Production monetary aggregation for a scope may be enabled only when all boxes b
 | 2026-09-22 | Implemented Slice 1 fixed-cost route shell: strict shared request validation, disabled scope registry, deterministic `SEMANTICS_UNVERIFIED` gate and future response metadata contracts. No monetary repository or replica query was added. |
 | 2026-09-22 | Implemented Slice 2 internal truck diagnostic contract/repository, unit tests and opt-in integration test. Verified schema and indexed plans; recorded categorical bounded-sample evidence. Public endpoints and all disabled semantic capabilities unchanged. |
 | 2026-09-22 | Slice 2 review corrections: removed hardcoded `infot_2.` qualifiers from diagnostic SQL, added a regression test, reduced the documented `masinos` schema to the relevant subset, and clarified that Slice 1 was committed as `2b252b8` before Slice 2. |
+| 2026-09-22 | Slice 3A bounded live semantic investigation: reran corrected Slice 2 SQL live; added ten categorical diagnostics (sign classes, raw deleted flag, date states and relationships); recorded EXPLAIN, aggregate evidence and the approval-question list in section 14. Coding gate remains closed. |
 
 ## 13. Slice 2 — bounded truck relationship investigation
 
@@ -414,3 +428,120 @@ Omitted checks and blockers:
 BA/ERP/Finance still must approve source precedence, amount meaning, component overlap, current/locked selection, currency, reporting period/date, deletion/status rules, zero/negative treatment, historical mapping, and a closed-period ERP reference. Equality here is exact database equality only; business tolerance remains unresolved. No amounts are added, no tolerance is introduced, and neither representation is made authoritative. MP-37/40/41/42 mappings are not inferred.
 
 Production monetary aggregation remains disabled. Every `fixedCostSemanticCapabilities` entry remains `enabled: false`. All three public endpoints still return `SEMANTICS_UNVERIFIED` for valid requests. Slice 1 contracts, capabilities, routes and `src/app.ts` are unchanged.
+
+## 14. Slice 3A — bounded live semantic investigation
+
+### Purpose and boundaries
+
+Slice 3A characterizes the Slice 2 truck mismatches with additional categorical evidence and lists the decisions still needed from ERP/BA/Finance. It extends the existing internal repository and opt-in integration test only. It adds no HTTP route, CLI, generic query tool, capability, monetary aggregation, numeric difference, ratio, subtotal, component sum or raw value/date output. All three public endpoints still return `SEMANTICS_UNVERIFIED`; every `fixedCostSemanticCapabilities` entry remains `enabled: false`.
+
+### Diagnostic categories added
+
+| Category | Values | SQL basis | Why needed |
+|---|---|---|---|
+| `taskLockedTotals` | `both_missing`, `left_missing`, `right_missing`, `equal`, `different` | exact equality of `uzdaviniai.kastaiVilkiko` (left) and summary `locked_kastaiVilkiko` (right) | Tests whether the task/summary difference co-occurs with the locked representation. |
+| `taskTruckValue`, `summaryCurrentValue`, `summaryLockedValue` | `missing`, `negative`, `zero`, `positive` | sign of `uzdaviniai.kastaiVilkiko`, summary `kastaiVilkiko`, summary `locked_kastaiVilkiko` | Distinguishes zero/non-zero and sign without magnitudes or tolerances. |
+| `summaryDeletedFlag` | `missing`, `zero`, `one`, `other` | raw `deleted` value | Records flag state without naming it deleted/reportable. |
+| `summaryCurrentDate`, `summaryLockedDate` | `missing`, `zero_date`, `valid_date`, `other` | `kastai_data`, `locked_kastaiVilkiko_data`; strict calendar-date text check | Distinguishes populated dates from zero dates without exposing dates. |
+| `currentLockedDate` | `both_missing`, `left_missing`, `right_missing`, `equal`, `current_before_locked`, `current_after_locked`, `unclassified` | order of the two summary dates; `unclassified` unless both are valid dates | Relationship only; neither date is treated as the reporting date. |
+| `detailCurrentDate`, `detailLockedDate` | `no_details`, `unclassified`, `summary_date_unusable`, `detail_date_unusable`, `all_equal`, `none_equal`, `mixed` | bounded detail `kastai_data` entries compared with each summary date; `unclassified` when detail entries exceed 100 | Relates the detail date to both summary dates without choosing one. |
+
+No task-date relationship was added. `uzdaviniai` has several date/datetime candidates (for example `pasikrovimo_data`, `pristatymo_data`, their `_temp`/`_temp2` variants, `premijavimo_data`, `kada_sukurta`, `last_update`); choosing one would be an unapproved semantic decision (FC-16). Assigned/actual truck comparison remains omitted (no verified text-to-master mapping). Detail components are not read.
+
+### Query and sample bounds
+
+- Input: unchanged, 1–20 distinct positive safe integer task IDs, validated before any pool call.
+- Still two fixed statement shapes per task, executed sequentially: at most 40 statements per run.
+- Summary shape: one bound parameter; three PK lookups (`uzdaviniai`, `kastai_fiksuoti_ataskaita`, `masinos`).
+- Detail shape: now two bound parameters, both the same task ID: one for the task-prefix lookup of at most 101 `(uzdavinys, kastai_data)` index entries, one for the single summary PK row whose dates are compared. This supersedes the section 13 statement that each task ID is bound once per statement.
+- All table names are static and unqualified; `ERP_REPLICA_DATABASE` selects the schema. Classification happens in SQL; the driver's representation of decimals and dates never reaches the repository, which accepts only allowlisted category strings.
+- The pool is created with `config.safety.queryTimeoutMs`. Errors are sanitized through `FixedCostDiagnosticError`.
+
+### Confirmed structural facts
+
+Re-verified through the authenticated schema API on 2026-09-22 (all completeness flags true):
+
+- `kastai_fiksuoti_ataskaita`: `PRIMARY(uzdavinys)`; `kastaiVilkiko`, `locked_kastaiVilkiko` `decimal(13,2)` NOT NULL default 0; `kastai_data`, `locked_kastaiVilkiko_data` `date` NOT NULL (default redacted); `deleted` `tinyint(1)` NOT NULL default 0.
+- `kastai_fiksuoti_vilkikai_det`: `PRIMARY(uzdavinys, kastai_data)`; `kastai_data` `date` NOT NULL.
+- `uzdaviniai`: `PRIMARY(id)`; `kastaiVilkiko` `decimal(13,2)` NOT NULL default 0; multiple date/datetime task-date candidates as listed above, with indexes on `pasikrovimo_data` and `pristatymo_data`.
+- The unqualified diagnostic SQL resolves against the configured database: `DATABASE()` matched `ERP_REPLICA_DATABASE`.
+- Because the amount and date columns are NOT NULL, `missing` values arise only from absent joined rows.
+
+### EXPLAIN evidence (Slice 3A shapes)
+
+Measured with one internally selected task; no identifiers, parameters, dates or values recorded.
+
+| Shape | Table / alias | Access type | Selected key | Estimated rows | Extra |
+|---|---|---|---|---:|---|
+| Summary | `<derived2>` (one parameter row) | system | — | 1 | empty |
+| Summary | `uzdaviniai` (`t`) | const | PRIMARY | 1 | empty |
+| Summary | `kastai_fiksuoti_ataskaita` (`s`) | const | PRIMARY | 1 | empty |
+| Summary | `masinos` (`m`) | const | PRIMARY | 1 | Using index |
+| Summary | — (parameter SELECT) | — | — | — | No tables used |
+| Detail | `<derived2>` (bounded detail entries) | ALL | — | 2 | empty |
+| Detail | `kastai_fiksuoti_ataskaita` (`s`) | const | PRIMARY | 1 | empty |
+| Detail | `kastai_fiksuoti_vilkikai_det` (derived) | ref | PRIMARY | 1 | Using index |
+
+The only `ALL` access is over the derived result capped at 101 entries, not a base table. The detail lookup remains covering (`Using index`); adding `kastai_data` to the derived projection reads only primary-key columns.
+
+### Bounded observations
+
+Sample: 20 task IDs selected internally as the newest summary rows (`ORDER BY uzdavinys DESC LIMIT 20` on the summary PK), passed only through the environment, never printed or persisted. This sample is not representative of history or of any closed period.
+
+All 20 tasks produced one identical category pattern:
+
+| Check | Count |
+|---|---|
+| task present / summary present / summary cardinality one | 20 / 20 / 20 |
+| assigned truck populated with master | 20 |
+| details present, detail cardinality one | 20 |
+| `truckTotals` (task vs summary current) different | 20 |
+| `currentLocked` (summary current vs locked) different | 20 |
+| `taskLockedTotals` (task vs summary locked) equal | 20 |
+| `taskTruckValue` zero | 20 |
+| `summaryCurrentValue` positive | 20 |
+| `summaryLockedValue` zero | 20 |
+| `summaryDeletedFlag` zero | 20 |
+| `summaryCurrentDate` valid_date | 20 |
+| `summaryLockedDate` zero_date | 20 |
+| `currentLockedDate` unclassified (locked date not a valid date) | 20 |
+| `detailCurrentDate` all_equal | 20 |
+| `detailLockedDate` summary_date_unusable | 20 |
+
+All other category counts were zero; sample size 20; complete true.
+
+Within this sample, the task/summary difference co-occurred with: task value zero versus positive summary current value; task value equal to the (zero) locked value; a zero locked date; `deleted = 0`; one detail row whose date equals the summary `kastai_data`. No negative values, missing rows, non-zero deleted flags or detail overflow were observed. Because every row shares one pattern, the sample shows co-occurrence only, not which factor explains the difference.
+
+### Hypotheses not proved
+
+- The task-level `kastaiVilkiko` and the locked summary fields may be populated only at a later stage (for example, when a calculation is locked). The sample is consistent with this but does not prove it; the newest tasks may simply not have reached that stage.
+- Summary `kastai_data` and detail `kastai_data` may denote the same calculation date for single-detail tasks. Only equality in this sample is shown.
+- `deleted = 0` may mark rows as included. Only the raw flag value is shown.
+- A closed-period or older sample may show different patterns; none was drawn.
+
+### Unverified business meaning
+
+No source, amount, date, lock, deletion, currency or sign rule is approved. Equality and sign classes are exact database comparisons, not reconciliation. Neither `uzdaviniai` nor the summary table is treated as authoritative, and current and locked values are never selected or combined.
+
+### Approval questions for ERP/BA/Finance
+
+1. Which table and field are authoritative for reportable truck fixed cost?
+2. What does `uzdaviniai.kastaiVilkiko` represent?
+3. What does `kastai_fiksuoti_ataskaita.kastaiVilkiko` represent?
+4. What does `locked_kastaiVilkiko` represent?
+5. Under what condition must the current or the locked value be selected?
+6. Which date controls financial reporting: a task date, `kastai_data`, the locked calculation date, or another period field?
+7. What does `deleted` mean, and must rows with a non-zero value be excluded?
+8. Is currency implicit, converted or stored elsewhere?
+9. Are zero and negative amounts valid?
+10. Are the detail component fields additive, overlapping or alternative representations?
+11. Which ERP report and closed period must be used for reconciliation?
+12. What tolerance, if any, is acceptable for reconciliation?
+13. Does one task belong to exactly one truck fixed-cost calculation?
+14. Is historical department ownership required, and which interval-boundary rules apply?
+
+None of these has a recorded named approval in this repository. They map to FC-01 to FC-16 in section 8.
+
+### Coding gate status
+
+The section 6 coding gate remains closed. No authoritative source, currency, reporting-date, deletion/lock, overlap or dimension rule is approved; no closed-period ERP reference or reconciliation exists; response metadata and classification version are unapproved. Production monetary aggregation remains disabled.
