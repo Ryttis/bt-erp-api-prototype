@@ -27,6 +27,10 @@ export interface AppConfig {
     slowQueryMs: number;
     maxRequestUrlLength: number;
   };
+  fixedCosts: {
+    /** Temporary MP-8 Slice 6P pilot: enables only the locked truck summary. */
+    truckSummaryPilotEnabled: boolean;
+  };
 }
 
 export class ConfigurationError extends Error {}
@@ -44,10 +48,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     }
     return Number(value);
   };
-  const ssl = env.ERP_REPLICA_SSL ?? 'false';
-  if (ssl !== 'true' && ssl !== 'false') {
-    throw new ConfigurationError('ERP_REPLICA_SSL must be true or false');
-  }
+  const boolean = (name: string): boolean => {
+    const value = env[name] ?? 'false';
+    if (value !== 'true' && value !== 'false') throw new ConfigurationError(`${name} must be true or false`);
+    return value === 'true';
+  };
+  const ssl = boolean('ERP_REPLICA_SSL');
   const serviceToken = required('ERP_ANALYTICS_API_TOKEN');
   if (serviceToken.length < 32) {
     throw new ConfigurationError('ERP_ANALYTICS_API_TOKEN must be at least 32 characters');
@@ -61,7 +67,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       database: required('ERP_REPLICA_DATABASE'),
       user: required('ERP_REPLICA_USER'),
       password: required('ERP_REPLICA_PASSWORD'),
-      ssl: ssl === 'true',
+      ssl,
       connectionLimit: integer('ERP_REPLICA_CONNECTION_LIMIT', 4, 100),
     },
     safety: {
@@ -71,6 +77,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       analyticsQueueTimeoutMs: integer('ERP_ANALYTICS_QUEUE_TIMEOUT_MS', 1000, 30000),
       slowQueryMs: integer('ERP_SLOW_QUERY_MS', 1000, 120000),
       maxRequestUrlLength: integer('MAX_REQUEST_URL_LENGTH', 4096, 16384),
+    },
+    fixedCosts: {
+      // Fail closed: absent means disabled, and anything but exact true/false is rejected.
+      truckSummaryPilotEnabled: boolean('ERP_FIXED_COST_TRUCK_SUMMARY_PILOT_ENABLED'),
     },
   };
 }
