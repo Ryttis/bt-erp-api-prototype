@@ -178,34 +178,37 @@ Reconcile closed-period truck fixed costs
 
 ### Slice 5 — Monetary repository and runtime contract
 
-Entry condition: FC-P16 must be answered first. The 2024-2025 sweep shows the full 15-component sum reproduces the stored task-level total within 1.00 EUR for every comparable task, so the component path is viable in principle; what remains unapproved is the rounding rule behind the sub-euro residual and the tolerance Finance will accept.
+Entry condition partially met. The 2024-2025 sweep and the Slice 5 complete-month runs show the component sum reproduces the stored total within 1.00 EUR for every comparable record, so the component path is viable as an explanatory breakdown. Slice 5 therefore implements the internal repository only: the authoritative total is read from the summary table and never recomputed from components, so FC-P16 no longer blocks the repository, but it still blocks publishing any component-derived measure.
 
 Goal: introduce the production repository boundary and explicit current/locked response semantics while keeping the public capability disabled.
 
-- [ ] Add a fixed-cost monetary repository interface.
-- [ ] Add a truck implementation using only static, parameterized, read-only SQL.
-- [ ] Use `kastai_fiksuoti_ataskaita` as the task-level summary source only after Slice 4 reconciliation passes.
-- [!] Use current and locked truck detail tables only for their corresponding component representations. Blocked by FC-P16: the component set composing the stored total is unknown, so no component-based measure can be built yet.
-- [ ] Join tasks through `uzdaviniai.id`, and trucks through the truck field approved under FC-08.
-- [ ] Apply the approved `deleted` rule.
-- [ ] Use the approved accounting-month/date filter without substituting lock date for accounting period.
-- [ ] Preserve decimal values without JavaScript floating-point aggregation.
-- [ ] Add explicit approved currency metadata; do not emit a currency that is not approved under FC-05.
-- [ ] Return current and locked measures separately.
-- [ ] Return lock state and lock-date semantics explicitly.
-- [ ] Represent unlocked completeness explicitly.
-- [ ] Route production queries through the existing analytics concurrency gate.
-- [ ] Add sanitized repository error handling.
-- [ ] Add fixed-cost telemetry for duration, outcome, timeout, busy state and bounded result counts.
-- [ ] Keep the truck public capability disabled throughout this slice.
+- [x] Add a fixed-cost monetary repository interface.
+- [x] Add a truck implementation using only static, parameterized, read-only SQL.
+- [x] Use `kastai_fiksuoti_ataskaita` as the authoritative task-level source, recorded as an implementation decision rather than a completed ERP-report reconciliation.
+- [x] Use current and locked truck detail tables only for their corresponding component representations. They are explanatory breakdowns only; the authoritative total is never derived from them.
+- [x] Join tasks through `uzdaviniai.id`, and trucks through `uzdaviniai.uzdavinio_masina` (FC-08), used only for the optional bounded truck allowlist.
+- [!] Apply the approved `deleted` rule. Blocked (FC-03): results are always separated by declared row state and aggregation fails closed until an internal approved policy is supplied.
+- [x] Filter on `kastai_data` as the cost month (FCB-06); the lock date is never substituted for the accounting period.
+- [x] Preserve decimal values without JavaScript floating-point aggregation.
+- [x] Emit explicit `EUR` currency metadata (FCB-07).
+- [x] Report null comparison fields, never `0.00`, for a row-state group with no comparable record, and mark it `structurally_non_comparable`.
+- [x] Emit an explicit `dateBasis` of `kastai_data` for both representations; the lock date is never a reporting-period filter.
+- [x] Preserve summary rows whose task is missing from `uzdaviniai` through an unconditional `LEFT JOIN`, and report `missingTaskCount`.
+- [x] Return current and locked measures separately.
+- [!] Return lock state and lock-date semantics explicitly. Deferred: the repository reports the representation, and the lock-date contract belongs to the public response (FC-02).
+- [!] Represent unlocked completeness explicitly. Deferred with FC-02/FC-P06.
+- [x] Route production queries through the existing analytics concurrency gate.
+- [x] Add sanitized repository error handling.
+- [!] Add fixed-cost telemetry for duration, outcome, timeout, busy state and bounded result counts. Intentionally deferred: no production path executes yet, and telemetry belongs with the enabled endpoint.
+- [x] Keep the truck public capability disabled throughout this slice.
 
 Acceptance criteria:
 
-- [ ] Repository unit tests cover parameters, SQL allowlists and decimal handling.
-- [ ] Tests prove current and locked values are never added together.
-- [ ] Tests prove summary totals are not repeated by detail joins.
-- [ ] Tests prove blocked public requests still execute no monetary query.
-- [ ] Typecheck, unit tests and integration tests pass or an environment-only skip is recorded.
+- [x] Repository unit tests cover parameters, SQL allowlists and decimal handling.
+- [x] Tests prove current and locked values are never added together, including mutation guards against crossing the two sources.
+- [x] Tests prove summary totals are not repeated by detail joins; detail access is a correlated aggregate, never a fan-out join.
+- [x] Tests prove blocked public requests still execute no monetary query.
+- [x] Typecheck and 119 unit tests pass. Opt-in monetary integration passed on three complete months; the pre-existing `live invoices` drift is recorded separately.
 
 Suggested commit:
 
@@ -453,7 +456,7 @@ Truck monetary capability may be enabled only when every item below is complete:
 | FC-P14 | Currency semantics: implicit EUR, converted, or joined (FC-05) | Finance / ERP | Response contract | Confirmed 2026-09-23 (FCB-07): EUR |
 | FC-P15 | Truck field for reporting: `uzdavinio_masina` or `uzd_vilk_vaziavo` (FC-08) | ERP / BA | Truck grouping and filtering | Confirmed 2026-09-23 (FCB-08) |
 | FC-P16 | Rounding rule behind the sub-euro residual between the component sum and the stored total (FC-06, FC-07) | ERP / Finance | Slice 5 and all monetary work | Open, narrowed: 0 of 116,678 comparable rows exceed 1.00 EUR; 43.33% exceed 0.01 EUR |
-| FC-P17 | Index or alternative access path for month-filtered production queries | ERP DBA / API owner | Public endpoint performance | Open: `kastai_fiksuoti_ataskaita.kastai_data` is unindexed |
+| FC-P17 | Index or alternative access path for month-filtered production queries | ERP DBA / API owner | Public endpoint performance | Open: `kastai_fiksuoti_ataskaita.kastai_data` is unindexed. A full month runs in ~2 s today, which does not make the plan production-ready. |
 | FC-P18 | Inclusion rule for summary rows whose task is absent from `uzdaviniai` | ERP / Finance | Production queries | Open: 105 and 78 such rows in the two probes |
 
 ## 12. Evidence and completion log
@@ -466,6 +469,8 @@ Truck monetary capability may be enabled only when every item below is complete:
 | 2026-09-23 | FCB-01..FCB-12 | ERP developer confirmed source roles, component split, locked representation, lock-state sentinel, cost month, EUR currency, truck field, separate display and the ~3-month recalculation window. | `docs/costs-endpoint.md` section 15 | — |
 | 2026-09-23 | SLICE-4 | Bounded internal month reconciliation added; settlement bound of six months and a 0.01 EUR tolerance recorded as implementation safety values pending Finance approval. | `src/fixed-costs/reconciliation-*.ts` | — |
 | 2026-09-23 | SLICE-4B | Magnitude buckets, sentinel correction and count-based quarterly/yearly aggregation added; 24-month sweep shows no comparable task above 1.00 EUR, superseding the earlier additivity reading. | `docs/costs-endpoint.md` section 16 | — |
+| 2026-09-23 | SLICE-5 | Authoritative total read from `kastai_fiksuoti_ataskaita` and never recomputed; detail tables are explanatory only; decimal-string contract; deleted-row policy fails closed. | `docs/costs-endpoint.md` section 17 | — |
+| 2026-09-23 | SLICE-5-FIX | Pre-commit corrections: null comparison fields for an empty comparable population, orphan-preserving `LEFT JOIN` with `missingTaskCount`, and explicit `dateBasis: kastai_data`. | `docs/costs-endpoint.md` section 17 | — |
 
 ### Reconciliation
 
@@ -496,6 +501,11 @@ Truck monetary capability may be enabled only when every item below is complete:
 | 2026-09-23 | Slice 4B | `npm test` | Passed | 98 unit tests, 0 failures (27 reconciliation, incl. 4 mutation guards) | — |
 | 2026-09-23 | Slice 4B | Opt-in sweep, 24 months | Passed | 288-387 ms per month; bounded prefix diagnostics | — |
 | 2026-09-23 | Slice 4B | `npm run test:integration` | Passed with known flake | Pre-existing `live invoices` row-count drift, unrelated to fixed costs | — |
+| 2026-09-23 | Slice 5 | `npm test` | Passed | 119 unit tests, 0 failures (21 monetary, incl. 5 mutation guards) | — |
+| 2026-09-23 | Slice 5 | Opt-in monetary integration | Passed | 2024-01, 2025-03, 2025-12 complete within the 50,000-record bound; counts only | — |
+| 2026-09-23 | Slice 5 | `npm run test:integration` | Passed with known flake | Same pre-existing `live invoices` drift; 1 of 2 runs | — |
+| 2026-09-23 | Slice 5 corrections | `npm test` | Passed | 128 unit tests, 0 failures (30 monetary, incl. 8 mutation guards) | — |
+| 2026-09-23 | Slice 5 corrections | Opt-in monetary integration, 2025-03 | Passed | Record counts unchanged by the LEFT JOIN; `missingTaskCount` 342 | — |
 | 2026-09-23 | Baseline audit | `npm run test:integration` | Not run as a suite | `tests/integration/fixed-cost-diagnostics.test.ts` ran and skipped: opt-in `FIXED_COST_DIAGNOSTIC_TASK_IDS` absent. The remaining live tests were not run because they print ERP business rows. | — |
 | 2026-09-23 | Baseline audit | `git diff --check` | Passed | Checked for `docs/fixed-costs-status-2026-09-23.md` | — |
 

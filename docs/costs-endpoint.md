@@ -246,6 +246,13 @@ Production monetary aggregation for a scope may be enabled only when all boxes b
 | 2026-09-23 | Classify absolute differences into six magnitude buckets in SQL decimal arithmetic, reporting comparable, all-sampled and relative-to-exact denominators. | Section 16; bucket ladder generated from one shared constant. | Engineering decision; bucket names carry no Finance judgement | Active |
 | 2026-09-23 | Exclude the truncation sentinel from every counter while preserving the `LIMIT 5001` hard bound. | `ROW_NUMBER()` gate; metadata separates `taskLimit`, `sampledTaskCount` and `fetchedTaskCount`. | Engineering correction | Active |
 | 2026-09-23 | Aggregate quarters and years by summing counts before deriving percentages; never average monthly percentages. | Pure tested aggregation function. | Engineering decision | Active |
+| 2026-09-23 | Treat `kastai_fiksuoti_ataskaita` as the authoritative task-level total and both detail tables as explanatory breakdowns only; never recompute the total from components. | Section 17; enforced by static SQL and mutation tests. | Engineering implementation decision; not an ERP-report reconciliation | Active |
+| 2026-09-23 | Carry every monetary value as canonical decimal text, with all arithmetic in SQL `DECIMAL`. | `CAST(... AS CHAR)` plus canonical-decimal validation; no JavaScript number conversion. | Engineering decision | Active |
+| 2026-09-23 | Always group monetary results by declared `deleted` state, and refuse aggregation until an internal approved policy is supplied. | Unapproved default fails closed before replica access (FC-03). | Engineering safety decision | Active |
+| 2026-09-23 | Raise rather than return a partial monetary result when a period exceeds the record bound. | `FixedCostMonetaryTruncated`; the statement reads `limit + 1`. | Engineering safety decision | Active |
+| 2026-09-23 | Report null, never `0.00`, for every comparison field of a group with no comparable record, and mark it `structurally_non_comparable`. | `SUM(CASE WHEN comparable = 1 ... ELSE NULL END)`; projection fails closed in both directions. | Engineering safety correction | Active |
+| 2026-09-23 | Always `LEFT JOIN uzdaviniai`, keep orphan summary rows in the authoritative population and count them with `missingTaskCount`. | A truck allowlist still excludes orphans deterministically, because an orphan cannot be mapped to a requested truck. | Engineering safety correction | Active |
+| 2026-09-23 | State the reporting-period basis as `dateBasis: "kastai_data"` for both representations. | `locked_kastaiVilkiko_data` stays lock-event metadata and is never a period filter. | Engineering decision, per FCB-06 | Active |
 
 ## 8. Open questions
 
@@ -253,7 +260,7 @@ Production monetary aggregation for a scope may be enabled only when all boxes b
 |---|---|---|---|---|
 | FC-01 | Is `kastai_fiksuoti_ataskaita` authoritative, or is `uzdaviniai` the authoritative repeated representation? | ERP/BA | Yes | Confirmed 2026-09-23 (FCB-01, FCB-02): `kastai_fiksuoti_ataskaita` holds the calculated task-level results; `kastaivilkikai` is configuration input. |
 | FC-02 | When must current versus locked values be used? | ERP/Finance | Yes | Partly: FCB-05 defines lock state and FCB-09 confirms ERP displays both separately. The API selection/exposure rule is still an open contract decision. |
-| FC-03 | Does `deleted = 0` define reportable summary rows? | ERP/Finance | Yes | Open |
+| FC-03 | Does `deleted = 0` define reportable summary rows? | ERP/Finance | Yes | Open. Section 17 observes that every `deleted = 1` record in three complete months had zero detail rows, so none was comparable. That is structural, not a business rule; monetary results stay separated by declared state and aggregation fails closed without an approved policy. |
 | FC-04 | Which date controls reporting? | Finance | Yes | Confirmed 2026-09-23 (FCB-06): `kastai_data` is the cost month. |
 | FC-05 | Are all fixed costs implicitly in EUR or already converted? | Finance/ERP | Yes | Confirmed 2026-09-23 (FCB-07): EUR. |
 | FC-06 | Do task summary totals reconcile to the sum of detail components? | ERP/Finance | Yes | Open, narrowed: section 16 measures every comparable task within 1.00 EUR across 24 months, with 56.68% within 0.01 EUR. Additivity holds at euro scale; the sub-euro residual rule is unapproved. |
@@ -317,6 +324,13 @@ Production monetary aggregation for a scope may be enabled only when all boxes b
 | 2026-09-23 | Uncommitted Slice 4 continued | Opt-in reconciliation, 24 months of 2024-2025 | Passed | Sequential; 288-387 ms per month; counters, buckets and aggregates only. Recorded in section 16. |
 | 2026-09-23 | Uncommitted Slice 4 continued | `npm run test:integration` | Passed with a known flake | Fixed-cost tests skipped by default as designed. The pre-existing `live invoices` test failed on 2 of 4 runs and passed on the others, reproducing the live row-count drift already recorded for Slice 1. It imports nothing from `src/fixed-costs/`. |
 | 2026-09-23 | Uncommitted Slice 4 continued | `git diff --check` | Passed | Scoped to the Slice 4 files. |
+| 2026-09-23 | Uncommitted Slice 5 over `e295c82` | `npm run typecheck` | Passed | No TypeScript errors. |
+| 2026-09-23 | Uncommitted Slice 5 | `npm test` | Passed | 119 unit tests, 0 failures; 21 in the new monetary file, including strict query validation, current/locked separation, authoritative-total provenance, decimal-string retention, net versus gross, Slice 4 bucket reuse, non-comparable handling, the fail-closed deleted policy, bounds, gate and timeout behavior, sanitized errors and five mutation guards. |
+| 2026-09-23 | Uncommitted Slice 5 | Opt-in monetary integration, 2024-01, 2025-03, 2025-12 | Passed | Complete months within the 50,000-record bound; counts only, roughly 2 s each. Recorded in section 17. |
+| 2026-09-23 | Uncommitted Slice 5 | `npm run test:integration` | Passed with the known flake | Fixed-cost tests skip by default. The pre-existing `live invoices` test failed on 1 of 2 runs and passed on the other, reproducing the recorded live row-count drift. It imports nothing from `src/fixed-costs/`. |
+| 2026-09-23 | Slice 5 pre-commit corrections | `npm test` | Passed | 128 unit tests, 0 failures; 30 in the monetary file, including null comparison fields, fail-closed mismatches in both directions, orphan preservation, `missingTaskCount` validation, truck-filter placeholder binding and the shared cost-month basis, plus three added mutation guards. |
+| 2026-09-23 | Slice 5 pre-commit corrections | Opt-in monetary integration, 2025-03 | Passed | Record counts identical to the pre-correction run; `missingTaskCount` 342, all in the `deleted = 1` group; null comparison fields confirmed live. |
+| 2026-09-23 | Uncommitted Slice 5 | `git diff --check` | Passed | Scoped to the Slice 5 files. |
 | 2026-09-23 | Uncommitted Slice 4 | `git diff --check` | Passed | Scoped to the Slice 4 files. |
 
 ## 12. Change log
@@ -330,6 +344,7 @@ Production monetary aggregation for a scope may be enabled only when all boxes b
 | 2026-09-22 | Slice 3A bounded live semantic investigation: reran corrected Slice 2 SQL live; added ten categorical diagnostics (sign classes, raw deleted flag, date states and relationships); recorded EXPLAIN, aggregate evidence and the approval-question list in section 14. Coding gate remains closed. |
 | 2026-09-23 | Slice 4: recorded ERP developer confirmations FCB-01 to FCB-12; captured the locked truck detail schema; added a bounded internal month-reconciliation capability with static SQL, a settlement bound, a documented 0.01 EUR tolerance and counter-only output; recorded EXPLAIN and two engineering-probe months. Measurement contradicts the expected component additivity, so the coding gate stays closed. |
 | 2026-09-23 | Slice 4 continued: added SQL magnitude buckets for absolute component differences with three documented denominators, corrected the truncation sentinel so counters never exceed the declared bound, added count-based quarterly/yearly aggregation, and swept all 24 months of 2024-2025. The magnitude evidence supersedes the earlier "additivity fails" reading: no comparable task differs by more than 1.00 EUR. Gate remains closed. |
+| 2026-09-23 | Slice 5: added the internal truck monetary contract and repository with decimal-string safety, explicit current/locked separation, authoritative totals read never recomputed, net and gross difference reporting, reuse of the Slice 4 buckets, structural non-comparable counters and a fail-closed unapproved deleted-row policy. Verified three complete months within the record bound. No public surface added; gate remains closed. |
 
 ## 13. Slice 2 — bounded truck relationship investigation
 
@@ -785,3 +800,98 @@ This does not open the coding gate. It converts FC-06/FC-07 from "additivity may
 ### Coding gate status after the distribution sweep
 
 Unchanged: **closed**. Production monetary aggregation stays disabled and all five allocation scopes remain behind `SEMANTICS_UNVERIFIED`. The blockers listed in section 15 stand, with FC-06/FC-07 restated as above and FC-14 now carrying a concrete question: a tolerance at or above 1.00 EUR per task would classify every comparable row in this sweep as reconciled, and that threshold is Finance's to set, not engineering's.
+
+## 17. Slice 5 — internal truck monetary repository and runtime contract
+
+### Implementation decision (2026-09-23)
+
+Recorded as an **engineering implementation decision**, not as a completed reconciliation against an official ERP report:
+
+- `kastai_fiksuoti_ataskaita` is the authoritative task-level fixed-cost total.
+- `kastai_fiksuoti_vilkikai_det` is the explanatory current component breakdown.
+- `kastai_fiksuoti_vilkikai_det_locked` is the explanatory locked component breakdown.
+
+The authoritative total is always read from the summary column and is **never** recalculated by summing components. Current and locked are never mixed. Component differences stay explicit and are never folded into an invented category. Public fixed-cost endpoints remain disabled and continue returning `SEMANTICS_UNVERIFIED`.
+
+### Runtime contract
+
+`src/fixed-costs/monetary-contract.ts` defines a strict internal query with exactly five fields: `allocationScope` (only `truck`), an explicit `representation` of `current` or `locked`, a canonical settled `periodMonth` validated by the Slice 4 month contract, an optional bounded allowlist of up to 50 numeric `truckIds`, and a `limit` bounded by a hard maximum of 50,000 records. There is no field, filter, grouping, sorting, measure, table, column or expression input, so neither a caller nor a model can influence the SQL beyond bound values. Trailer, department, support and expedition monetary repositories were not implemented.
+
+Every monetary value is a `DecimalString`: subtraction, absolute value and summation happen in SQL `DECIMAL`, each aggregate is `CAST(... AS CHAR)` before it crosses the driver boundary, and the text is validated against a canonical decimal pattern. No monetary value is ever parsed into a JavaScript `number`. Counts remain integers and percentages are derived only from counts.
+
+Per declared row state the result carries `authoritativeTotal`, `comparableAuthoritativeTotal`, `componentTotal`, `netDifference`, `grossAbsoluteDifference`, `authoritativeRecords`, `comparableRecords`, `affectedRecords`, the six Slice 4 bucket counters, `noDetailRecords`, `multipleDetailRecords` and `missingTotalRecords`. Metadata carries `currency: "EUR"`, `representation`, authoritative and breakdown sources, the fifteen verified ERP component field identifiers, `classificationApplied: false`, `classificationVersion: null`, `semanticsVersion: null`, `recordLimit`, `recordsRead`, `truncated`, `complete`, the deleted-row policy, `reconciliationStatus: "unreconciled"`, the pending approvals and the limitations list.
+
+`authoritativeTotal` spans every in-scope record of a state, including structurally non-comparable ones, so nothing is silently dropped from the authoritative population. `componentTotal` spans comparable records only. `comparableAuthoritativeTotal` exists precisely so the two are never compared across different populations. `netDifference` is the signed sum and `grossAbsoluteDifference` sums per-record absolute values, so positive and negative row differences cannot cancel.
+
+#### Null comparison fields for an empty comparable population
+
+A group with no comparable record reports `null` for `comparableAuthoritativeTotal`, `componentTotal`, `netDifference` and `grossAbsoluteDifference`, and carries a group-level `reconciliationStatus` of `structurally_non_comparable`. It never reports `0.00`, because a fabricated zero reads as "the components reconcile exactly", which is the opposite of "there is nothing to compare". The SQL uses `SUM(CASE WHEN r.comparable = 1 THEN <value> ELSE NULL END)`, so an empty comparable population produces SQL NULL rather than an additive-identity zero.
+
+`authoritativeTotal` is unaffected: it remains the real total for the full row-state population, and is `null` only in the degenerate case where no record of that state carries a stored total at all. Projection fails closed in both directions — a comparison field that is non-null without comparable records, or null with them, raises `InvalidFixedCostMonetaryResult` rather than being reported.
+
+#### Reporting-period basis
+
+Both representations filter the reporting period on `a.kastai_data`, the confirmed cost month (FCB-06), and the runtime metadata states this explicitly as `dateBasis: "kastai_data"`. `locked_kastaiVilkiko_data` is lock-event metadata and is never used as a reporting-period filter or bound as a period parameter; the locked representation is the locked amount *for a cost month*, not a period defined by when the lock occurred.
+
+#### Orphan summary rows
+
+`kastai_fiksuoti_ataskaita` is the base authoritative population and the join to `uzdaviniai` is always a `LEFT JOIN`, so a summary row whose task is absent stays in the population, keeps its declared row state, contributes to `authoritativeTotal`, and is counted by `missingTaskCount` on the group and in metadata. Such a row is never assigned truck `0`, `unknown` or any invented identifier, and if it has no usable detail match it remains structurally non-comparable.
+
+Deterministic limitation: when an explicit truck allowlist is supplied, an orphan has `t.uzdavinio_masina` NULL, `NULL IN (...)` is not TRUE, and the row is excluded — an orphan cannot be mapped to a requested truck. `truckFilterApplied` records whether that exclusion was in force. `LIMIT` is applied after the period predicate and the optional truck predicate inside the same SELECT, so the bound always applies to the filtered population.
+
+Bucket boundaries are imported from the committed Slice 4 ladder. No second ladder is defined.
+
+### Unresolved deleted-row policy
+
+`deleted` semantics remain unapproved (FC-03), so two independent safeguards are active:
+
+1. Results are **always** grouped by declared `deleted` state (`zero`, `one`, `other`). No policy choice can merge states into a single authoritative figure, and a duplicate state group fails closed.
+2. Aggregation refuses to execute until an internal caller supplies an approved policy. The module default `unapprovedFixedCostDeletedRowPolicy` has `approved: false`, so the default path raises `FixedCostDeletedPolicyUnapproved` **before any replica access**.
+
+The policy is an internal injected registration. It is absent from every public contract, cannot be supplied through a request, and cannot be selected by a model. An approval also requires a non-empty `approvedBy` and an allowlisted treatment.
+
+### Structurally non-comparable records
+
+A record is comparable only when it has a non-null authoritative total and exactly one matching detail row. Records failing that stay in `authoritativeRecords` and in the authoritative total, are counted as `noDetailRecords`, `multipleDetailRecords` or `missingTotalRecords`, never enter a reconciliation bucket, and are never given a fabricated zero component total.
+
+### Classification
+
+No business labels or cost-group mappings were invented. The breakdown exposes the fifteen verified ERP source column identifiers only, `classificationApplied` is `false` and `classificationVersion` is `null`.
+
+### Query safety and plan status
+
+Static per-representation statements with unqualified tables; the configured `ERP_REPLICA_DATABASE` selects the schema. All caller input is bound, including the truck IN list, which is rendered as `?` markers only. Ordering is deterministic on `a.uzdavinys` and `r.deletedState`. The statement reads `LIMIT limit + 1`, and a period exceeding the bound raises `FixedCostMonetaryTruncated` rather than returning a partial sum. Execution runs through the shared `AnalyticsGate` and the configured query timeout, driver errors are sanitized through `FixedCostMonetaryError`, and no monetary value, truck identifier or row is logged.
+
+**The missing `kastai_data` index remains a blocker (FC-P17).** A full month currently executes in roughly 2 seconds, but that speed does not make the query production-ready: the summary month filter still requires a full primary-key walk, and the cost grows with table size rather than with the result.
+
+### Bounded live verification (2026-09-23)
+
+Three complete months were executed through the opt-in integration test. Only counts are recorded; no monetary total, difference or identifier was printed or stored.
+
+Unlike the Slice 4 diagnostic, whose 5,000-record bound truncated every month, the 50,000-record bound holds a whole month: all three returned `complete: true` at roughly 21,000-22,000 records and about 2 seconds each. **These are therefore complete-month structural figures, not lowest-task-ID prefixes** — but they remain internal diagnostics, not an official ERP reconciliation.
+
+| Month | Records | `deleted=0` comparable | exact | rounding | small | moderate | material | large | `deleted=1` records | `deleted=1` comparable |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2024-01 | 21,619 | 20,404 | 11,360 | 1,164 | 7,880 | 0 | 0 | 0 | 627 | 0 |
+| 2025-03 | 21,158 | 20,468 | 10,891 | 673 | 8,904 | 0 | 0 | 0 | 363 | 0 |
+| 2025-12 | 21,862 | 20,803 | 11,166 | 949 | 8,688 | 0 | 0 | 0 | 497 | 0 |
+
+Observations, stated as measurements:
+
+1. At full-month scale the Slice 4 finding holds: `moderate`, `material` and `large` are empty in every month and both representations. No comparable record differs from its component sum by more than 1.00 EUR.
+2. Every `deleted = 1` record in all three months had **zero** detail rows, so none was comparable. Under the corrected contract that group reports `structurally_non_comparable` with null comparison fields while keeping its real authoritative total. This is a structural observation about where breakdowns exist; it does not establish what `deleted` means and does not resolve FC-03.
+5. In 2025-03, `missingTaskCount` was 342 of 21,158 records, and **all 342 fell in the `deleted = 1` group** (363 records); the `deleted = 0` group had none. Record counts were identical before and after the join was made an unconditional `LEFT JOIN`, confirming no authoritative row was previously lost and none was added. The co-occurrence of deletion and a missing task is a measurement, not an approved rule.
+3. `multipleDetailRecords` is effectively absent: 0, 0 and 1 across the three months.
+4. Locked figures track current closely but are computed independently (2025-03: 9,577 affected current versus 9,579 locked).
+
+### Slice 5 task status
+
+Complete: the internal monetary contract and repository, current/locked separation, decimal-string safety, null comparison fields for an empty comparable population, the explicit `kastai_data` date basis, orphan-preserving `LEFT JOIN` with `missingTaskCount`, the reconciliation metadata block, the fail-closed deleted-row policy, structural non-comparable handling, query bounds and ordering, analytics-gate and timeout integration, sanitized errors, unit and mutation tests, and the opt-in bounded integration test.
+
+Blocked: enabling any public monetary capability (FC-11 official reference, FC-14 tolerance), the `deleted` inclusion rule (FC-03), the sub-euro residual rule (FC-06, FC-07), and a production-acceptable month-filtered query plan (FC-P17).
+
+Intentionally deferred: trailer, department, support and expedition monetary repositories; cost-group classification; any HTTP or CLI surface; telemetry emission for a path that cannot yet run in production.
+
+### Coding gate status after Slice 5
+
+Unchanged: **closed**. Production monetary aggregation stays disabled and all five allocation scopes remain behind `SEMANTICS_UNVERIFIED`.
