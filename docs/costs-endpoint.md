@@ -1041,3 +1041,84 @@ Not implemented and not claimed: any grouped production SQL or query plan, month
 ### Coding gate status after Slice 7A
 
 Unchanged: **closed**. Production monetary aggregation stays disabled.
+
+## 20. Slice 8A — gated dimension contract, availability registry and orchestration
+
+Slice 8, like Slices 6 and 7, mixed buildable work with work blocked on approvals. It is split, and this section records **Slice 8A only**.
+
+**Every fixed-cost dimension is publicly unavailable, because no fixed-cost filter or grouping capability has been activated.** A dimension exists to list the values a caller may legitimately use in an *enabled* filter or grouping; none is enabled, so no live value is returned through HTTP and no dimension query runs.
+
+### Implemented code
+
+| Artifact | Purpose |
+|---|---|
+| `src/fixed-costs/dimension-contract.ts` | Strict request parsing, the static availability registry, exposure classification and future response types. |
+| `src/fixed-costs/dimension-service.ts` | Gated orchestration: capability and availability gates, field/sort allowlists, completeness and uniqueness checks, ordering and pagination. |
+| `tests/unit/fixed-cost-dimensions.test.ts` | 16 tests covering the registry, boundaries, gates, bounds and the route boundary. |
+
+### Request contract
+
+Exactly six parameters: `allocationScope`, `dimension`, `page`, `perPage`, `sortBy`, `sortDirection`. Everything else is refused — unknown and repeated parameters, arbitrary table, column or schema names, search expressions, SQL fragments, field or measure selection, grouping expressions, deleted-row policy, tolerance, representation, internal limits and sensitive-field selection.
+
+Generic schema-discovery parameters (`table`, `column`, `schema`, `q`, `search`, `pattern`, `include`, `expand`) are deliberately **not** offered here. Schema discovery already exists as its own bounded, separately-authenticated surface; a fixed-cost dimension is a business-value list, not a second way to enumerate the database.
+
+Parameter names continue the fixed-cost surface's camelCase convention rather than the snake_case of `/vehicles` and `/invoices`. Both already coexist, and a dimensions request shares one query string with `allocationScope`.
+
+### Availability registry
+
+One static, deeply frozen registry — code, never request-controlled. Each entry records its key, structural source, public availability, blockers, allowed response fields, allowed filters, allowed sorting, maximum page size and an exposure classification.
+
+| Dimension | Public availability | Structural source | Blockers |
+|---|---|---|---|
+| `truck` | **false** | `uzdaviniai.uzdavinio_masina` joined to `masinos.id` (FCB-08 / FC-08) | FC-11, FC-14, FC-03, FC-02, FC-P17 |
+| `costComponent` | **false** | The fifteen verified decimal columns of the truck detail tables | FC-06, FC-07 |
+| `month` | **false** | `kastai_fiksuoti_ataskaita.kastai_data` (FCB-06) | FC-P19, FC-P17 |
+
+Structural verification is not business approval: `truck` has a verified numeric mapping and is still unavailable, because no filter or grouping consumes it yet. A test asserts every entry is `false`, that the registry and its nested arrays are frozen, and that attempting to flip a value or push a field throws and leaves the registry unchanged.
+
+### Truck field boundary
+
+`allowedFields`, `allowedFilters` and `allowedSorting` are each exactly `['truckId']`. The exposure classification is `internal_identifier`, restricted to the numeric identifier alone.
+
+Nothing descriptive is exposed and nothing is inherited from the `/vehicles` field set: no `masinos_nr`, registration string, VIN, make, model, status, lifecycle date, department, lease or rental field, odometer, driver or employee data, comment, or any other `masinos` column. No display name is invented, and no "unknown truck" value exists — records whose truck cannot be resolved are reported as structural counters by the breakdown layer, never as a dimension value. The service enforces this at runtime too: a value carrying any field outside the allowlist, or a non-positive-integer identifier, fails closed.
+
+The truck dimension also does not enumerate `masinos`. A future implementation must be scoped to trucks that actually appear in fixed-cost analytics data, which is Slice 8B work.
+
+### Cost-component boundary
+
+The fifteen verified technical column names remain an internal explanatory inventory, sorted deterministically, with `independentlyAdditive: false`, `syntheticResidualBucket: false` and `status: explanatory_semantics_unverified`. No user-supplied column name is accepted, no business label is invented, there is no synthetic `other` component, and the names are never read dynamically from `INFORMATION_SCHEMA`. Public availability stays false, and `allowedFilters` is empty, so an unapproved dimension offers no filter.
+
+### Month decision — no live query
+
+**No month-availability SQL was added.** `kastai_data` is unindexed, so enumerating available months would scan the full summary table; and the date-range to cost-month mapping is itself unapproved. The dimension is recorded as blocked by FC-P19 and FC-P17, and a test proves a month request performs zero executor calls.
+
+### Pagination, ordering and completeness
+
+Maximum page size 200 (default 50), maximum 5,000 values. Ordering is allowlisted per dimension on its single key, total in both directions, so pages tile the set exactly once; an out-of-range page fails closed. A result that is truncated, incomplete, whose `valueCount` disagrees with its values, that carries duplicates, or that answers a different dimension is refused.
+
+### Unavailable is not an empty success
+
+The result is a discriminated union. An unavailable dimension returns `availability: 'unavailable'` with its blockers and **no `values` array at all**, `complete: false`, and null pagination and sorting. Returning `values: []` would be indistinguishable from "available, but no values exist" — a test asserts both shapes and that they differ.
+
+### Route behaviour, unchanged
+
+All five capabilities remain disabled. A dimensions request still returns HTTP 422 `SEMANTICS_UNVERIFIED` with zero replica access; summary and breakdown are unchanged; every non-truck scope stays blocked. Dimension-specific and schema-discovery parameters are refused with 400 `INVALID_QUERY` before the semantic gate. The route set is unchanged at exactly summary, breakdown and dimensions, with no dimensions sub-route and no schema-discovery, diagnostic, reconciliation or monetary path.
+
+### Pre-commit review corrections
+
+A review of this slice found and closed two low-severity defects, both reproduced first:
+
+1. **An unknown registry entry produced a raw `TypeError`.** A registry lacking the requested dimension dereferenced `undefined` instead of failing closed. The lookup is now guarded and raises a typed `registry_entry_missing`, which also catches an entry whose `key` disagrees with its slot.
+2. **A missing executor was reported as `dimension_unavailable`.** When the registry marks a dimension available and the caller supplies no executor, the old reason misstated system state — the dimension was available; the caller was incomplete. That path now reports `executor_unavailable`.
+
+The review also confirmed the injection seam is not a production bypass: `registry` and `capabilities` are explicit function parameters that no request, route or model input can reach, and **nothing in `src/` imports the dimensions service at all**, so it currently has no production caller. The shipped registry remains the default on every path.
+
+### Slice 8A status
+
+Implemented: request contract, availability registry with exposure classification, truck and component boundaries, month blocking with zero database access, gated orchestration, pagination and ordering bounds, completeness and uniqueness checks, the unavailable/empty distinction, and 19 unit tests including mutation guards and three review regressions.
+
+Not implemented and not claimed: any dimension SQL or query plan, live dimension values, an approved public truck display field, and capability activation.
+
+### Coding gate status after Slice 8A
+
+Unchanged: **closed**. Production monetary aggregation stays disabled.

@@ -299,6 +299,7 @@ Goal: build the breakdown contract, bounds and orchestration with no activation 
 - [x] Reject incomplete, truncated, duplicate, mismatched or population-inconsistent executor results.
 - [x] Validate every monetary field as decimal text, including reconciliation measures, and refuse a resolved truck group that claims missing-task records. Added by pre-commit review after both were reproduced.
 - [x] Preserve timeout and `SERVICE_BUSY` errors unchanged.
+- [x] Fail closed with a typed error on a missing or mislabelled registry entry, and report a missing executor distinctly from an unavailable dimension. Added by pre-commit review after both were reproduced.
 - [!] Implement `truck` grouping SQL. Deferred to 7B: a month-filtered grouped statement still needs the access path FC-P17 leaves unresolved, so no bounded query can be proved safe yet.
 - [!] Implement `month` grouping. Blocked (FC-P19).
 - [!] Implement `costComponent` grouping. Blocked (FC-06, FC-07).
@@ -348,30 +349,68 @@ Suggested commit:
 Enable truck fixed-cost breakdown analytics
 ```
 
-### Slice 8 — Truck dimensions endpoint
+### Slice 8A — Gated dimension contract, availability registry and orchestration
 
-Goal: expose only dimension values that are valid for the enabled truck analytics filters and groupings.
+Goal: build the dimension contract, availability registry and orchestration with no activation and no dimension SQL.
 
-- [ ] Finalize the dimensions request contract.
-- [ ] Expose the verified truck dimension with minimal required fields.
-- [ ] Expose the static approved cost-component dimension.
-- [ ] Expose month/period availability only when it can be queried with a bounded plan.
-- [ ] Add bounded pagination and deterministic sorting.
-- [ ] Exclude sensitive and unrelated vehicle fields.
-- [ ] Reject arbitrary column, table and schema discovery requests.
-- [ ] Add query-plan and integration tests.
+**Every dimension is publicly unavailable because no fixed-cost filter or grouping capability has been activated.** A dimension lists values usable by an enabled filter or grouping; none is enabled.
+
+- [x] Finalize the dimensions request contract: exactly six parameters, rejecting unknown, repeated, SQL-shaped, field, measure, grouping, schema-discovery and internal-control input. Evidence: `src/fixed-costs/dimension-contract.ts`; `tests/unit/fixed-cost-dimensions.test.ts`.
+- [x] Add one static, deeply frozen availability registry recording source, availability, blockers, allowed fields, filters, sorting, page bound and exposure classification.
+- [x] Keep every registry entry publicly unavailable, asserted by test, with mutation guards proving a flipped entry is the only thing that reaches an executor.
+- [x] Restrict the truck dimension to the verified numeric identifier, excluding `masinos_nr`, registration, status, lifecycle, department, lease, driver and every other unrelated or sensitive column.
+- [x] Invent no truck display name and no unknown-truck value; unresolved records stay structural counters.
+- [x] Keep the fifteen technical component fields as a static explanatory inventory, deterministically ordered, non-additive, non-public, with no synthetic residual and no `INFORMATION_SCHEMA` read.
+- [x] Represent the month dimension as blocked with zero database access.
+- [x] Run capability and availability gates before any executor access.
+- [x] Add bounded pagination and deterministic total ordering per dimension.
+- [x] Reject incomplete, truncated, duplicate, oversized or mismatched executor results.
+- [x] Distinguish blocked/unavailable from available-but-empty, so an unavailable dimension is never a plausible empty success.
+- [x] Preserve timeout and `SERVICE_BUSY` errors unchanged.
+- [x] Fail closed with a typed error on a missing or mislabelled registry entry, and report a missing executor distinctly from an unavailable dimension. Added by pre-commit review after both were reproduced.
+- [!] Add a live month-availability query. Blocked: `kastai_data` is unindexed, so enumeration would scan the full summary table (FC-P17), and the month mapping is unapproved (FC-P19).
+- [!] Add a live truck-value query. Deferred to 8B: a truck dimension must be scoped to trucks appearing in fixed-cost analytics data, which needs the access path FC-P17 leaves unresolved.
+
+Acceptance criteria:
+
+- [x] No sensitive or unrelated ERP field is reachable through the dimension contract.
+- [x] Arbitrary column, table and schema-discovery requests are rejected.
+- [x] Pagination and ordering are deterministic and reproducible.
+- [x] An unavailable dimension cannot be mistaken for an empty successful one.
+
+Suggested commit:
+
+```text
+Add gated truck fixed-cost dimension contract and orchestration
+```
+
+### Slice 8B — Approved values, bounded indexed queries, integration evidence and activation
+
+Goal: prove the dimension queries and enable the public dimensions endpoint.
+
+**Cannot start until the blockers below are answered. None is resolvable by engineering.**
+
+- [!] Enable a fixed-cost filter or grouping capability, so a dimension has a consumer at all.
+- [!] Obtain a production-safe access path for `kastai_data` (FC-P17).
+- [!] Approve the date-range to cost-month mapping (FC-P19).
+- [!] Approve independent additivity before `costComponent` can become a business dimension (FC-06, FC-07).
+- [!] Approve any public truck display field beyond the verified numeric identifier.
+- [ ] Add bounded indexed queries scoped to trucks present in fixed-cost analytics data, never a full `masinos` enumeration.
+- [ ] Run and record `EXPLAIN` for every dimension query shape.
+- [ ] Add integration evidence for the enabled dimension.
 - [ ] Enable the truck dimensions capability only after all tests pass.
 
 Acceptance criteria:
 
 - [ ] Every returned dimension value can be used by an enabled filter or grouping.
 - [ ] Dimension queries are bounded, indexed and deterministic.
-- [ ] No sensitive ERP fields are returned.
+- [ ] No sensitive ERP field is returned.
+- [ ] Existing `/vehicles`, invoice and schema endpoints remain unchanged.
 
 Suggested commit:
 
 ```text
-Add truck fixed-cost dimensions
+Enable truck fixed-cost dimensions
 ```
 
 ### Slice 9 — Response caching and operational hardening
@@ -544,6 +583,7 @@ Truck monetary capability may be enabled only when every item below is complete:
 | 2026-09-23 | SLICE-5-FIX | Pre-commit corrections: null comparison fields for an empty comparable population, orphan-preserving `LEFT JOIN` with `missingTaskCount`, and explicit `dateBasis: kastai_data`. | `docs/costs-endpoint.md` section 17 | — |
 | 2026-09-23 | SLICE-6A | Summary contract and disabled orchestration; lock-state counters from the confirmed FCB-05 sentinel; `SERVICE_BUSY` preserved. Slice 6 split into 6A and 6B because its checklist mixed buildable work with unresolved approvals. | `docs/costs-endpoint.md` section 18 | — |
 | 2026-09-23 | SLICE-7A | Breakdown contract, grouping-availability registry, bounds, deterministic ordering and gated orchestration. No production SQL: a grouped month-filtered statement still depends on FC-P17. Slice 7 split into 7A and 7B. | `docs/costs-endpoint.md` section 19 | — |
+| 2026-09-23 | SLICE-8A | Dimension contract, static availability registry with exposure classification, truck/component/month boundaries and gated orchestration. No dimension SQL: month enumeration needs FC-P17 and the truck dimension must be scoped to analytics data. Slice 8 split into 8A and 8B. | `docs/costs-endpoint.md` section 20 | — |
 
 ### Reconciliation
 
@@ -583,6 +623,8 @@ Truck monetary capability may be enabled only when every item below is complete:
 | 2026-09-23 | Slice 6A review | `npm test` | Passed | 151 unit tests after adding period/request consistency validation and 3 regression tests | — |
 | 2026-09-23 | Slice 7A | `npm test` | Passed | 171 unit tests, 0 failures (20 new breakdown tests incl. mutation guards) | — |
 | 2026-09-23 | Slice 7A review | `npm test` | Passed | 173 unit tests after validating reconciliation decimals and refusing missing-task records on resolved groups | — |
+| 2026-09-23 | Slice 8A | `npm test` | Passed | 189 unit tests, 0 failures (16 new dimension tests incl. mutation guards) | — |
+| 2026-09-23 | Slice 8A review | `npm test` | Passed | 192 unit tests after guarding the registry lookup and correcting the missing-executor reason | — |
 | 2026-09-23 | Slice 6A | Opt-in monetary integration, 2025-03 | Passed | Record counts unchanged by the lock-state counters; every `deleted = 0` record locked, every `deleted = 1` record unlocked | — |
 | 2026-09-23 | Baseline audit | `npm run test:integration` | Not run as a suite | `tests/integration/fixed-cost-diagnostics.test.ts` ran and skipped: opt-in `FIXED_COST_DIAGNOSTIC_TASK_IDS` absent. The remaining live tests were not run because they print ERP business rows. | — |
 | 2026-09-23 | Baseline audit | `git diff --check` | Passed | Checked for `docs/fixed-costs-status-2026-09-23.md` | — |
