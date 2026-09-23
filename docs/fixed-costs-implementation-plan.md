@@ -271,7 +271,7 @@ Pilot policy: summary endpoint and `truck` scope only; exactly one complete cale
 - [x] Add duration/outcome telemetry without amounts, identifiers, dates, rows or driver diagnostics (review fix: diagnostics replaced by a failure classification).
 - [x] Keep breakdown, dimensions and every other scope at 422; add no route.
 - [x] Add 31 unit tests including 8 mutation guards, and an opt-in live test with `EXPLAIN`.
-- [!] Run the opt-in live pilot test and record the pilot-specific `EXPLAIN`. Blocked on 2026-09-23: the replica and the staging API were unreachable from the workstation (TCP connect failure, `ER_CONNECTION_TIMEOUT`).
+- [x] Run the opt-in live pilot test and record the pilot-specific `EXPLAIN`. 2025-03 and 2025-07 passed on 2026-09-23 after fixing a test-only BigInt serialization failure; evidence in Section 12 and `docs/costs-endpoint.md` section 21.
 - [!] Stage deployment and smoke test. Pending review and commit.
 
 Acceptance criteria:
@@ -280,9 +280,9 @@ Acceptance criteria:
 - [x] With the flag on, only the restricted truck summary can succeed.
 - [x] No current, component-derived, deleted, unlocked, truncated or fabricated amount can be returned, and no amount is inferred from missing data.
 - [x] Existing `/vehicles`, invoice and schema routes are unchanged.
-- [!] The live pilot returns 200 for a settled 2025 month with a fully locked included population. Not run: replica unreachable.
+- [x] The live pilot returns 200 for a settled 2025 month with a fully locked included population: 2025-03 (20,795/20,795 locked) and 2025-07 (23,669/23,669 locked).
 
-Known limitation: the month filter is the recorded full primary-key walk of `kastai_fiksuoti_ataskaita` (~1.56 million rows, FC-P17). Acceptable only as internal low-volume pilot behaviour; not production-ready.
+Known limitation: the pilot `EXPLAIN` confirms the month filter is a full primary-key walk of `kastai_fiksuoti_ataskaita` (`type: index`, `key: PRIMARY`, no possible keys, ~1,556,311 estimated rows, `Using where`); all other accesses are single-row primary-key lookups. Acceptable only as internal low-volume pilot behaviour; not production-ready. FC-P17 stays open.
 
 Rollback: set `ERP_FIXED_COST_TRUCK_SUMMARY_PILOT_ENABLED=false` and restart.
 
@@ -643,6 +643,7 @@ Truck monetary capability may be enabled only when every item below is complete:
 |---|---|---|---|---|---|---|
 | 2026-09-23 | Month reconciliation statement | 2 month bounds; `LIMIT 5001`; gate + timeout | Task/truck/detail PRIMARY `eq_ref`/`ref`, 1 row each | 5,001 derived | Yes, internal only | — |
 | 2026-09-23 | Month filter on summary table | `kastai_data` range | `type: index`, full PK walk, no usable index | ~1,556,311 | No for a public endpoint | — |
+| 2026-09-23 | Slice 6P exact locked pilot statement (2025-03 and 2025-07, identical) | 2 bound month values; `LIMIT 50001`; gate + timeout | `a`: `index`, key PRIMARY, possible_keys null, `Using where`; `t`: `eq_ref` PRIMARY, `Using index`; both locked-detail subqueries: `ref` PRIMARY; outer: `<derived6>` `ALL`, `Using temporary; Using filesort` | `a` ~1,556,311; derived 50,001; lookups 1 | Yes, low-volume internal pilot only; not for general production (FC-P17 open) | — |
 
 ### Validation
 
@@ -676,6 +677,9 @@ Truck monetary capability may be enabled only when every item below is complete:
 | 2026-09-23 | Slice 6P final correction | `npm test` | Passed | 223 unit tests after replacing the empty-month `"0.00"` with `NO_DATA_FOR_PERIOD`, preserving stored zero totals, and mapping null/malformed driver rows to `INCOMPLETE_RESULT` | — |
 | 2026-09-23 | Slice 6P | `npm run test:integration` | Environment-blocked | 7 live tests failed identically with `ER_GET_CONNECTION_TIMEOUT`/`ER_CONNECTION_TIMEOUT` (replica unreachable, TCP connect also fails); 4 opt-in tests skipped | — |
 | 2026-09-23 | Slice 6P | Opt-in live pilot, 2025-03 | Not run | Replica and staging API unreachable from the workstation; 504 `QUERY_TIMEOUT` from `ER_GET_CONNECTION_TIMEOUT` | — |
+| 2026-09-23 | Slice 6P live | Opt-in live pilot, 2025-03, first attempt after connectivity returned | Failed in the test | Request succeeded (200); the test then failed serializing EXPLAIN `BigInt` columns, hidden by a generic catch. Fixed in the test only | — |
+| 2026-09-23 | Slice 6P live | Opt-in live pilot, 2025-03 | Passed | 200; 2,242 ms; 20,795 tasks, 20,795 locked; complete; auth, flag-off and unsupported-request checks passed; EXPLAIN recorded; no amount printed | — |
+| 2026-09-23 | Slice 6P live | Opt-in live pilot, 2025-07 | Passed | 200; 2,561 ms; 23,669 tasks, 23,669 locked; complete; same checks passed; identical EXPLAIN; no amount printed | — |
 | 2026-09-23 | Baseline audit | `npm run test:integration` | Not run as a suite | `tests/integration/fixed-cost-diagnostics.test.ts` ran and skipped: opt-in `FIXED_COST_DIAGNOSTIC_TASK_IDS` absent. The remaining live tests were not run because they print ERP business rows. | — |
 | 2026-09-23 | Baseline audit | `git diff --check` | Passed | Checked for `docs/fixed-costs-status-2026-09-23.md` | — |
 

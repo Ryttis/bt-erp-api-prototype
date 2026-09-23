@@ -1235,18 +1235,37 @@ Telemetry is one event per request with `operation: fixed_cost.truck_summary_pil
 
 ### Query-plan limitation
 
-The pilot reuses the Slice 5 locked statement unchanged. **That exact statement has not been EXPLAINed.** The only recorded evidence for its month predicate is the Slice 4 measurement of the `kastai_data` filter on `kastai_fiksuoti_ataskaita` (section 12 of the implementation plan): `type: index`, a full primary-key walk of ~1.56 million rows, with no usable index. The statement additionally joins `uzdaviniai` by primary key and runs two correlated subqueries per summary row against `kastai_fiksuoti_vilkikai_det_locked` on its leading `uzdavinys` key column. Those shapes are expected to use the primary keys, but that is unverified until the pilot EXPLAIN runs.
+The pilot reuses the Slice 5 locked statement unchanged. `EXPLAIN` of that exact statement, with the bound month values, was recorded on 2026-09-23 by the opt-in live test and was identical for 2025-03 and 2025-07:
+
+| id | select_type | table | type | possible_keys | key | key_len | rows (estimate) | Extra |
+|---:|---|---|---|---|---|---:|---:|---|
+| 1 | PRIMARY | `<derived6>` | ALL | — | — | — | 50,001 | Using temporary; Using filesort |
+| 6 | DERIVED | `a` (`kastai_fiksuoti_ataskaita`) | index | — | PRIMARY | 4 | 1,556,311 | Using where |
+| 6 | DERIVED | `t` (`uzdaviniai`) | eq_ref | PRIMARY | PRIMARY | 4 | 1 | Using index |
+| 5 | DEPENDENT SUBQUERY | `d` (`kastai_fiksuoti_vilkikai_det_locked`, component sum) | ref | PRIMARY | PRIMARY | 4 | 1 | — |
+| 4 | DEPENDENT SUBQUERY | `d` (`kastai_fiksuoti_vilkikai_det_locked`, row count) | ref | PRIMARY | PRIMARY | 4 | 1 | Using index |
+
+The month predicate on `kastai_data` has no usable index (`possible_keys` is null), so `kastai_fiksuoti_ataskaita` is read as a full primary-key index walk of ~1.56 million estimated rows with `Using where`. Every other access is a single-row primary-key lookup: `uzdaviniai` by `eq_ref`, and both correlated locked-detail subqueries by `ref` on the leading `uzdavinys` key column. The outer grouping reads the bounded derived table (limit plus one sentinel row, 50,001 estimated) with a temporary table and filesort, which is bounded by the record limit. The full month-filter scan is the expected and only unbounded access, and it confirms FC-P17.
 
 This is acceptable only as **internal, low-volume pilot behaviour** for one settled month per request. It is **unsuitable for general production traffic**; FC-P17 stays open, and no cache hides the cost.
 
-The opt-in live test runs `EXPLAIN` on the exact pilot statement. It could not run on 2026-09-23 because the replica was unreachable (see test evidence), so the pilot-specific plan is not yet recorded.
+Measured end-to-end request durations were 2,242 ms (2025-03) and 2,561 ms (2025-07) for one request at a time. This plan is **acceptable only for the internal, low-volume pilot** and **not for general production traffic**: every request scans the summary table regardless of the month, so cost does not shrink with the period and concurrent requests multiply it. FC-P17 stays open.
 
 ### Test evidence
 
 - `tests/unit/fixed-cost-pilot.test.ts`: 31 tests covering the flag, resolver, success, authentication, decimal preservation, `NO_DATA_FOR_PERIOD` for absent data, legitimate stored zero totals, malformed driver results, metadata, period rules, rejected parameters, deleted exclusion, lock refusal, completeness, timeout/busy/unavailable, telemetry, unchanged routes, and 8 mutation guards (flag bypass, executing before gates, current instead of locked, including `deleted = 1`, accepting unlocked, removing completeness, component sum replacing the total, dropping limitations).
 - `tests/unit/config.test.ts`: default and strict parsing of the flag.
 - `tests/integration/fixed-cost-pilot.test.ts`: opt-in via `FIXED_COST_PILOT_TEST_MONTH=YYYY-MM-01`; prints status, counters, duration and `EXPLAIN` access metadata only.
-- **No live validation has been performed.** On 2026-09-23 the replica and the staging API were unreachable from the workstation, so the live pilot, the pilot EXPLAIN and the rest of the live integration suite did not run. No accepted ERP reconciliation exists.
+- **Live pilot validation (2026-09-23)**, with the flag forced on for the test process only, against the configured replica. Safe counters only; no amount was printed or recorded.
+
+  | Month | HTTP | Duration | `totalTaskCount` | `lockedTaskCount` | `complete` | Record limit |
+  |---|---:|---:|---:|---:|---|---:|
+  | 2025-03 | 200 | 2,242 ms | 20,795 | 20,795 | true | 50,000 |
+  | 2025-07 | 200 | 2,561 ms | 23,669 | 23,669 | true | 50,000 |
+
+  Both runs also verified: the unauthenticated request is 401; with the flag off the same request is 422 `SEMANTICS_UNVERIFIED`; breakdown, dimensions and the trailer scope are 422 `SEMANTICS_UNVERIFIED`; a `representation` parameter is 400; the amount is canonical two-scale decimal text; `semanticsVersion`, `pilot`, `complete` and `reconciliationStatus` match the contract. The 2025-03 count matches the `deleted = 0` population measured in Slice 6A (20,795, all locked).
+- The first live attempt reached the successful request and then failed with only the generic message "Fixed-cost pilot integration failed". The hidden cause was in the test, not the endpoint: the driver returns EXPLAIN's `id` and `rows` columns as `BigInt`, and `JSON.stringify` on the plan threw `TypeError: Do not know how to serialize a BigInt`. The test now converts plan numbers explicitly and reports the failing stage with a safe cause (assertion message, sanitized driver diagnostics, or a non-driver error name and message) instead of hiding it.
+- No accepted ERP reconciliation exists; the live result is a provisional pilot figure.
 
 ### Rollback
 
