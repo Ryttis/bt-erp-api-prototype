@@ -55,7 +55,7 @@ An item may be marked `[x]` only when its acceptance criteria are satisfied and 
 - [x] Unknown, repeated and unsafe/SQL-shaped parameters are rejected.
 - [x] `INVALID_QUERY` and `SEMANTICS_UNVERIFIED` are deterministic.
 - [x] Blocked monetary requests execute no replica query.
-- [x] All monetary allocation scopes are disabled in the capability registry.
+- [x] All monetary allocation scopes are disabled in the static capability registry. The Slice 6P pilot is resolved separately from configuration and leaves the registry unchanged.
 - [x] Response metadata types exist.
 - [x] Bounded internal diagnostics, unit tests and an opt-in integration test exist.
 - [x] Diagnostic SQL is static, parameterized and bounded.
@@ -247,6 +247,49 @@ Suggested commit:
 
 ```text
 Add truck fixed-cost summary contract and gated orchestration
+```
+
+### Slice 6P — Provisional locked truck summary pilot
+
+Goal: give BT Finance Analyst one provisional, internal, flag-gated monetary answer — the locked truck fixed-cost total for one settled calendar month — without resolving or pre-empting any Slice 6B approval.
+
+**Temporary MP-8 pilot policy, not permanent Finance approval.** Tracked separately from Slice 6B; Slice 6B, 7B, 8B, Slice 9 caching and the Section 9 production gate stay open. Full contract: `docs/costs-endpoint.md` section 21.
+
+Pilot policy: summary endpoint and `truck` scope only; exactly one complete calendar month at least six months before the current month; source `kastai_fiksuoti_ataskaita`; reportable amount `locked_kastaiVilkiko`; period basis `kastai_data`; EUR; `deleted = 0` included, `deleted = 1` excluded, any other state refused; every included task locked, otherwise refused; no component-derived total; no current value; no caching.
+
+- [x] Add the fail-closed `ERP_FIXED_COST_TRUCK_SUMMARY_PILOT_ENABLED` flag: default `false`, strict `true`/`false`, invalid values fail configuration. Documented in `.env.example`; `compose.yaml` untouched. Evidence: `src/config.ts`; `tests/unit/config.test.ts`; `tests/unit/fixed-cost-pilot.test.ts`.
+- [x] Resolve capability deterministically from validated configuration (`resolveFixedCostCapability`); only `summary` + `truck` + flag `true` resolves as enabled. The static registry is deeply frozen and still all-disabled.
+- [x] Wire routes with `config.fixedCosts` only; a missing or non-boolean option resolves to disabled; no request, model or query input reaches the resolver.
+- [x] Flag off: the valid summary request returns 422 `SEMANTICS_UNVERIFIED` with zero replica and gate access.
+- [x] Accept only one exact complete, settled calendar month; refuse partial and multi-month ranges (`PERIOD_NOT_COMPLETE_MONTH`) and recent months (`PERIOD_NOT_SETTLED`) before replica access. Avoids FC-P19 rather than answering it.
+- [x] Execute one locked read through the existing gated repository with the frozen internal `exclude_deleted` pilot policy, static unqualified SQL, bound values, `AnalyticsGate`, configured timeout and the 50,000-record bound with truncation detection.
+- [x] Refuse unlocked or unknown lock state (`PERIOD_NOT_FULLY_LOCKED`); refuse truncated, undeclared-state, missing-total or inconsistent results (`INCOMPLETE_RESULT`).
+- [x] Return the stored locked total as canonical decimal text, with no JavaScript arithmetic. Absence of ERP rows is never interpreted as zero: no rows, or rows only in `deleted = 1`, return 422 `NO_DATA_FOR_PERIOD`; `"0.00"` is returned only for real, complete, fully locked `deleted = 0` records whose stored total is `0.00` (final correction).
+- [x] Convert a null, missing or malformed driver result into `INCOMPLETE_RESULT` instead of a generic 500; the repository now rejects non-object rows with its typed result error (final correction).
+- [x] Emit fixed pilot metadata: exact `semanticsVersion` `truck-fixed-cost-summary-pilot-v1`, `reconciliationStatus` `provisional_unreconciled_erp_reference`, `pilot: true` and sorted constant limitations.
+- [x] Preserve `SERVICE_BUSY` (503), `QUERY_TIMEOUT` (504) and `REPLICA_UNAVAILABLE` (503) with sanitized messages; connection-acquisition timeouts report `REPLICA_UNAVAILABLE`, not `QUERY_TIMEOUT` (review fix).
+- [x] Add duration/outcome telemetry without amounts, identifiers, dates, rows or driver diagnostics (review fix: diagnostics replaced by a failure classification).
+- [x] Keep breakdown, dimensions and every other scope at 422; add no route.
+- [x] Add 31 unit tests including 8 mutation guards, and an opt-in live test with `EXPLAIN`.
+- [!] Run the opt-in live pilot test and record the pilot-specific `EXPLAIN`. Blocked on 2026-09-23: the replica and the staging API were unreachable from the workstation (TCP connect failure, `ER_CONNECTION_TIMEOUT`).
+- [!] Stage deployment and smoke test. Pending review and commit.
+
+Acceptance criteria:
+
+- [x] With the flag off, behaviour is identical to Slice 8A.
+- [x] With the flag on, only the restricted truck summary can succeed.
+- [x] No current, component-derived, deleted, unlocked, truncated or fabricated amount can be returned, and no amount is inferred from missing data.
+- [x] Existing `/vehicles`, invoice and schema routes are unchanged.
+- [!] The live pilot returns 200 for a settled 2025 month with a fully locked included population. Not run: replica unreachable.
+
+Known limitation: the month filter is the recorded full primary-key walk of `kastai_fiksuoti_ataskaita` (~1.56 million rows, FC-P17). Acceptable only as internal low-volume pilot behaviour; not production-ready.
+
+Rollback: set `ERP_FIXED_COST_TRUCK_SUMMARY_PILOT_ENABLED=false` and restart.
+
+Suggested commit:
+
+```text
+Add flag-gated provisional truck fixed-cost summary pilot
 ```
 
 ### Slice 6B — Reconciliation, performance approval and capability activation
@@ -583,6 +626,7 @@ Truck monetary capability may be enabled only when every item below is complete:
 | 2026-09-23 | SLICE-5-FIX | Pre-commit corrections: null comparison fields for an empty comparable population, orphan-preserving `LEFT JOIN` with `missingTaskCount`, and explicit `dateBasis: kastai_data`. | `docs/costs-endpoint.md` section 17 | — |
 | 2026-09-23 | SLICE-6A | Summary contract and disabled orchestration; lock-state counters from the confirmed FCB-05 sentinel; `SERVICE_BUSY` preserved. Slice 6 split into 6A and 6B because its checklist mixed buildable work with unresolved approvals. | `docs/costs-endpoint.md` section 18 | — |
 | 2026-09-23 | SLICE-7A | Breakdown contract, grouping-availability registry, bounds, deterministic ordering and gated orchestration. No production SQL: a grouped month-filtered statement still depends on FC-P17. Slice 7 split into 7A and 7B. | `docs/costs-endpoint.md` section 19 | — |
+| 2026-09-23 | SLICE-6P | Temporary MP-8 pilot policy (not Finance approval): flag-gated locked truck summary for one settled complete month, `deleted = 0` only, fully locked population required, no current value, no caching. Slice 6B not advanced. | `docs/costs-endpoint.md` section 21 | — |
 | 2026-09-23 | SLICE-8A | Dimension contract, static availability registry with exposure classification, truck/component/month boundaries and gated orchestration. No dimension SQL: month enumeration needs FC-P17 and the truck dimension must be scoped to analytics data. Slice 8 split into 8A and 8B. | `docs/costs-endpoint.md` section 20 | — |
 
 ### Reconciliation
@@ -626,6 +670,12 @@ Truck monetary capability may be enabled only when every item below is complete:
 | 2026-09-23 | Slice 8A | `npm test` | Passed | 189 unit tests, 0 failures (16 new dimension tests incl. mutation guards) | — |
 | 2026-09-23 | Slice 8A review | `npm test` | Passed | 192 unit tests after guarding the registry lookup and correcting the missing-executor reason | — |
 | 2026-09-23 | Slice 6A | Opt-in monetary integration, 2025-03 | Passed | Record counts unchanged by the lock-state counters; every `deleted = 0` record locked, every `deleted = 1` record unlocked | — |
+| 2026-09-23 | Slice 6P | `npm run typecheck` | Passed | No TypeScript errors | — |
+| 2026-09-23 | Slice 6P | `npm test` | Passed | 221 unit tests, 0 failures (29 new pilot tests incl. 8 mutation guards) | — |
+| 2026-09-23 | Slice 6P review | `npm test` | Passed | 221 unit tests after re-classifying connection-acquisition timeouts, removing driver diagnostics from pilot logs, and strengthening the flag-off gate check | — |
+| 2026-09-23 | Slice 6P final correction | `npm test` | Passed | 223 unit tests after replacing the empty-month `"0.00"` with `NO_DATA_FOR_PERIOD`, preserving stored zero totals, and mapping null/malformed driver rows to `INCOMPLETE_RESULT` | — |
+| 2026-09-23 | Slice 6P | `npm run test:integration` | Environment-blocked | 7 live tests failed identically with `ER_GET_CONNECTION_TIMEOUT`/`ER_CONNECTION_TIMEOUT` (replica unreachable, TCP connect also fails); 4 opt-in tests skipped | — |
+| 2026-09-23 | Slice 6P | Opt-in live pilot, 2025-03 | Not run | Replica and staging API unreachable from the workstation; 504 `QUERY_TIMEOUT` from `ER_GET_CONNECTION_TIMEOUT` | — |
 | 2026-09-23 | Baseline audit | `npm run test:integration` | Not run as a suite | `tests/integration/fixed-cost-diagnostics.test.ts` ran and skipped: opt-in `FIXED_COST_DIAGNOSTIC_TASK_IDS` absent. The remaining live tests were not run because they print ERP business rows. | — |
 | 2026-09-23 | Baseline audit | `git diff --check` | Passed | Checked for `docs/fixed-costs-status-2026-09-23.md` | — |
 

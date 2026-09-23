@@ -182,6 +182,8 @@ function decimalOrNull(row: Record<string, unknown>, column: string): DecimalStr
 }
 
 function projectGroup(row: Record<string, unknown>): FixedCostMonetaryGroup {
+  // A null or non-object driver row is malformed output, never an empty group.
+  if (row === null || typeof row !== 'object' || Array.isArray(row)) throw new InvalidFixedCostMonetaryResult('Unexpected driver row');
   const deletedState = row.deletedState;
   if (typeof deletedState !== 'string' || !(fixedCostDeletedStates as readonly string[]).includes(deletedState)) {
     throw new InvalidFixedCostMonetaryResult('Unrecognized declared row state');

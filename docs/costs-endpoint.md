@@ -1122,3 +1122,140 @@ Not implemented and not claimed: any dimension SQL or query plan, live dimension
 ### Coding gate status after Slice 8A
 
 Unchanged: **closed**. Production monetary aggregation stays disabled.
+
+## 21. Slice 6P — provisional locked truck summary pilot
+
+Slice 6P is a **deliberately narrow, temporary internal pilot** for BT Finance Analyst. It is tracked separately from Slice 6B and does not complete it: none of the Slice 6B approvals (FC-02, FC-03, FC-11, FC-14, FC-P17, FC-P19) is resolved here. The pilot is **not** production activation and **not** an officially reconciled Finance report.
+
+### Temporary MP-8 pilot policy
+
+Recorded as an MP-8 engineering pilot decision, **not** as permanent Finance approval:
+
+| Rule | Pilot value |
+|---|---|
+| Endpoint | `GET /expense-analytics/fixed-costs/summary` only |
+| Allocation scope | `truck` only |
+| Period | Exactly one complete calendar month: `dateFrom` is the first day, `dateTo` the actual last day of the same month |
+| Settlement | The month starts at least six months before the current month (the Slice 4 rule, reused) |
+| Source | `kastai_fiksuoti_ataskaita` |
+| Reportable amount | `locked_kastaiVilkiko` (stored task-level total, never recomputed from components) |
+| Period basis | `kastai_data` (FCB-06) |
+| Currency | EUR (FCB-07) |
+| Deleted rows | Only `deleted = 0` is included; `deleted = 1` is excluded; any other `deleted` value refuses the month |
+| Lock state | Every included task must be locked (FCB-05 sentinel); `lockedTaskCount` must equal `totalTaskCount`, and unlocked and unknown lock-state counts must be zero, otherwise the request is refused |
+| Current value | Never read and never reported |
+| Caching | None; responses carry `Cache-Control: no-store` |
+
+Because the request must already be one exact calendar month, the pilot needs no answer to FC-P19: it accepts no partial month, no inclusivity rule and no multi-month span. The deleted-row policy is a frozen module constant (`truckFixedCostPilotDeletedRowPolicy`, `approvedBy: "MP-8 Slice 6P temporary pilot policy (not Finance approval)"`), never request input.
+
+### Feature flag
+
+`ERP_FIXED_COST_TRUCK_SUMMARY_PILOT_ENABLED`, default `false`, parsed strictly: only the exact strings `true` and `false` are accepted, and any other value (including `TRUE`, `1`, `yes` or an empty string) fails configuration at startup. It is documented in `.env.example`; `compose.yaml` was intentionally not edited.
+
+- `false`: the summary behaves exactly as before — a valid request returns 422 `SEMANTICS_UNVERIFIED` with zero replica and zero analytics-gate access. Pilot period rules are not evaluated.
+- `true`: only `summary` + `truck` resolves as enabled. Breakdown, dimensions and the trailer, department, support and expedition scopes stay 422 `SEMANTICS_UNVERIFIED`.
+
+Capability resolution is the pure function `resolveFixedCostCapability(endpoint, scope, config.fixedCosts)`. The static `fixedCostSemanticCapabilities` registry is now deeply frozen and still all-disabled; nothing mutates it. `buildApp` passes only `config.fixedCosts` to `registerFixedCostRoutes`, and a missing or non-boolean option resolves to disabled. No query parameter, body or model input reaches the resolver.
+
+### Supported request
+
+```text
+GET /expense-analytics/fixed-costs/summary?allocationScope=truck&dateFrom=2025-03-01&dateTo=2025-03-31
+Authorization: Bearer <service token>
+```
+
+Rejected before any replica access:
+
+| Request class | Result |
+|---|---|
+| Missing or wrong token | 401 `UNAUTHORIZED` |
+| Unknown, repeated or SQL-shaped parameters; `representation`, deleted policy, tolerance, fields, measures, `groupBy`, sorting, pagination, table/column/schema names, internal limits | 400 `INVALID_QUERY` |
+| Missing date pair, malformed, impossible or reversed dates | 400 `INVALID_QUERY` |
+| Partial month or multi-month range | 422 `PERIOD_NOT_COMPLETE_MONTH` |
+| Month starting less than six months before the current month | 422 `PERIOD_NOT_SETTLED` |
+| Non-truck scope, breakdown, dimensions, or the flag off | 422 `SEMANTICS_UNVERIFIED` |
+
+### Response contract
+
+```json
+{
+  "data": {
+    "allocationScope": "truck",
+    "periodMonth": "2025-03-01",
+    "amount": "<decimal string, redacted>",
+    "currency": "EUR",
+    "representation": "locked",
+    "totalTaskCount": 0,
+    "lockedTaskCount": 0
+  },
+  "meta": {
+    "sourceFamily": "truck_fixed_costs",
+    "amountSemantics": "authoritative_locked_task_total_excluding_deleted",
+    "dateBasis": "kastai_data",
+    "semanticsVersion": "truck-fixed-cost-summary-pilot-v1",
+    "reconciliationStatus": "provisional_unreconciled_erp_reference",
+    "complete": true,
+    "pilot": true,
+    "limitations": ["<sorted, see below>"]
+  }
+}
+```
+
+`amount` is the SQL `DECIMAL` sum cast to text and validated as canonical decimal text; it is never parsed into a JavaScript number.
+
+**Absence of ERP rows is never interpreted as zero.** A month with no summary rows, or with rows only in the excluded `deleted = 1` population, returns 422 `NO_DATA_FOR_PERIOD` with no amount, counts or metadata. `"0.00"` is returned only when at least one included `deleted = 0` record exists, the population is complete and fully locked, and its stored locked total is exactly `0.00`. A missing group, a null or malformed driver row, an incomplete or truncated read, or a missing stored total never becomes zero.
+
+`limitations` is a constant, sorted, de-duplicated list stating that the result is a provisional internal pilot; that `deleted = 1` rows are excluded under a temporary MP-8 pilot policy (FC-03); that it is not reconciled against an accepted official ERP report (FC-11); that only one settled complete calendar month is supported; that the amount is the stored locked total and no current value is reported; that orphan summary rows remain included (FC-P18); that zero/negative amounts pass through unchanged (FC-13); and that `kastai_data` month filtering is unindexed, low-volume pilot behaviour and not production-ready (FC-P17).
+
+### Errors
+
+| Code | HTTP | When |
+|---|---:|---|
+| `SEMANTICS_UNVERIFIED` | 422 | Flag off, non-truck scope, breakdown or dimensions |
+| `PERIOD_NOT_COMPLETE_MONTH` | 422 | Not exactly one complete calendar month |
+| `PERIOD_NOT_SETTLED` | 422 | Month too recent |
+| `PERIOD_NOT_FULLY_LOCKED` | 422 | Any included task unlocked or of unknown lock state |
+| `INCOMPLETE_RESULT` | 422 | Truncated read, undeclared `deleted` state, missing stored total, a null, missing or malformed driver result, or an inconsistent repository result |
+| `NO_DATA_FOR_PERIOD` | 422 | No summary rows for the month, or rows only in `deleted = 1`; absence of records is not reported as a zero amount |
+| `SERVICE_BUSY` | 503 | Analytics gate saturated |
+| `QUERY_TIMEOUT` | 504 | The statement ran and hit the statement or driver query timeout |
+| `REPLICA_UNAVAILABLE` | 503 | Any other replica failure, including a connection that could not be obtained (`ER_GET_CONNECTION_TIMEOUT`, `ER_CONNECTION_TIMEOUT`) |
+
+Messages are fixed strings. No SQL, driver message, amount or identifier is returned, and no driver diagnostics are logged: pilot telemetry records only a `failure` classification (`statement_timeout`, `connection` or `replica`).
+
+The shared `isQueryTimeout` classifier treats any code containing `TIMEOUT` as a query timeout, which includes connection-acquisition timeouts. The pilot route re-classifies those two connector codes as `REPLICA_UNAVAILABLE`, because no statement executed. The shared classifier, and therefore every other endpoint, is unchanged. `ER_GET_CONNECTION_TIMEOUT` cannot distinguish an unreachable replica from a pool exhausted by other traffic; both are reported as unavailable.
+
+`PILOT_DISABLED` was requested as an error, but the same request also required a disabled flag to return 422 `SEMANTICS_UNVERIFIED`. The latter was kept, so a disabled pilot is indistinguishable from the pre-pilot behaviour; no `PILOT_DISABLED` code is emitted.
+
+### Repository execution
+
+`runTruckFixedCostPilotSummary` resolves the period first, then performs **one** locked read through the existing `queryFixedCostMonetaryTotals`: static unqualified SQL, bound month values only, `AnalyticsGate`, the pool's configured query timeout, the 50,000-record hard bound with its truncation sentinel, and sanitized `FixedCostMonetaryError`s. The current representation is not read: lock state is a task-level property counted from `locked_kastaiVilkiko_data` in the same row, so the Slice 6A current/locked population cross-check has nothing to compare. The repository still separates groups by declared `deleted` state; the pilot selects the `deleted = 0` group with no arithmetic.
+
+Telemetry is one event per request with `operation: fixed_cost.truck_summary_pilot`, `duration_ms`, `outcome` (`success`, `refused`, `error`, `timeout`, `busy`), and the refusal code, failure classification or `total_task_count`. Successes are logged at `info` below `ERP_SLOW_QUERY_MS` and at `warn` otherwise; refusals and failures are logged at `warn`. It carries no amount, task ID, truck ID, date, row, SQL or driver diagnostic.
+
+### Query-plan limitation
+
+The pilot reuses the Slice 5 locked statement unchanged. **That exact statement has not been EXPLAINed.** The only recorded evidence for its month predicate is the Slice 4 measurement of the `kastai_data` filter on `kastai_fiksuoti_ataskaita` (section 12 of the implementation plan): `type: index`, a full primary-key walk of ~1.56 million rows, with no usable index. The statement additionally joins `uzdaviniai` by primary key and runs two correlated subqueries per summary row against `kastai_fiksuoti_vilkikai_det_locked` on its leading `uzdavinys` key column. Those shapes are expected to use the primary keys, but that is unverified until the pilot EXPLAIN runs.
+
+This is acceptable only as **internal, low-volume pilot behaviour** for one settled month per request. It is **unsuitable for general production traffic**; FC-P17 stays open, and no cache hides the cost.
+
+The opt-in live test runs `EXPLAIN` on the exact pilot statement. It could not run on 2026-09-23 because the replica was unreachable (see test evidence), so the pilot-specific plan is not yet recorded.
+
+### Test evidence
+
+- `tests/unit/fixed-cost-pilot.test.ts`: 31 tests covering the flag, resolver, success, authentication, decimal preservation, `NO_DATA_FOR_PERIOD` for absent data, legitimate stored zero totals, malformed driver results, metadata, period rules, rejected parameters, deleted exclusion, lock refusal, completeness, timeout/busy/unavailable, telemetry, unchanged routes, and 8 mutation guards (flag bypass, executing before gates, current instead of locked, including `deleted = 1`, accepting unlocked, removing completeness, component sum replacing the total, dropping limitations).
+- `tests/unit/config.test.ts`: default and strict parsing of the flag.
+- `tests/integration/fixed-cost-pilot.test.ts`: opt-in via `FIXED_COST_PILOT_TEST_MONTH=YYYY-MM-01`; prints status, counters, duration and `EXPLAIN` access metadata only.
+- **No live validation has been performed.** On 2026-09-23 the replica and the staging API were unreachable from the workstation, so the live pilot, the pilot EXPLAIN and the rest of the live integration suite did not run. No accepted ERP reconciliation exists.
+
+### Rollback
+
+Set `ERP_FIXED_COST_TRUCK_SUMMARY_PILOT_ENABLED=false` (or remove it) and restart the service. The summary immediately returns 422 `SEMANTICS_UNVERIFIED` with zero replica access. No data, schema or cache state needs reverting.
+
+### Permanent-production blockers (unchanged)
+
+FC-02 current/locked public exposure policy; FC-03 approved deleted-row rule; FC-11/FC-P01/FC-P02 accepted ERP reference month and result; FC-13 zero/negative treatment; FC-14 tolerance; FC-P17 indexed access path for `kastai_data`; FC-P18 orphan-row inclusion rule; FC-P19 general day-range to month mapping; Slice 9 caching; the Section 9 production activation gate.
+
+### Coding gate status after Slice 6P
+
+Unchanged: **closed** for production. Only the flag-gated internal pilot can return an amount.

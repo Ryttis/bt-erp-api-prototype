@@ -70,6 +70,7 @@ export function buildApp(config: AppConfig, poolFactory = createReplicaPool, opt
   app.register(registerInvoiceRoutes);
   app.register(registerDocumentRoutes);
   app.register(registerSchemaRoutes);
-  app.register(registerFixedCostRoutes);
+  // Only the validated configuration reaches the fixed-cost capability resolver.
+  app.register(registerFixedCostRoutes, { fixedCosts: config.fixedCosts });
   return app;
 }
