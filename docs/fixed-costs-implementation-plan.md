@@ -279,37 +279,73 @@ Suggested commit:
 Enable truck fixed-cost summary analytics
 ```
 
-### Slice 7 — Truck breakdown endpoint
+### Slice 7A — Gated breakdown contract and orchestration
 
-Goal: expose bounded reconciled groupings without duplicating the task-level total.
+Goal: build the breakdown contract, bounds and orchestration with no activation and no production SQL.
 
-- [ ] Finalize the breakdown request contract.
-- [ ] Add an allowlisted `groupBy` contract.
-- [ ] Implement `month` grouping after date semantics are verified.
-- [ ] Implement `truck` grouping through the truck field approved under FC-08.
-- [ ] Implement `costComponent` grouping through a static component mapping.
-- [ ] Confirm every exposed component is independently additive.
-- [ ] Keep current and locked component measures separate.
-- [ ] Add bounded pagination for grouped results.
-- [ ] Add a maximum group count.
-- [ ] Add allowlisted sorting with a stable tie-breaker.
-- [ ] Add deterministic filtering by verified truck identifier only.
-- [ ] Reject unsupported groupings, sorting, filters and measures.
-- [ ] Run and record `EXPLAIN` for every grouping query shape.
-- [ ] Add total-versus-breakdown reconciliation tests.
-- [ ] Enable the truck breakdown capability only after reconciliation passes.
+- [x] Finalize the breakdown request contract: an exact parameter allowlist rejecting unknown, repeated, SQL-shaped, field, measure, filter, table and column input. Evidence: `src/fixed-costs/breakdown-contract.ts`; `tests/unit/fixed-cost-breakdown.test.ts`.
+- [x] Add an allowlisted `groupBy` contract with explicit per-grouping availability, so a blocked grouping is never treated as supported.
+- [x] Add bounded pagination for grouped results: max page size 200, default 50, max 1,000 groups, out-of-range page fails closed.
+- [x] Add a maximum group count that fails closed rather than truncating.
+- [x] Add allowlisted sorting with an immutable `truckId` tie-breaker, so pages tile the set exactly once.
+- [x] Add deterministic filtering by verified numeric truck identifier only.
+- [x] Reject unsupported groupings, sorting, filters and measures.
+- [x] Keep current and locked measures separate through two independent reads.
+- [x] Use stored authoritative totals and never reconstruct a task total from components.
+- [x] Join no detail table in the breakdown path, so a one-to-many relationship cannot multiply a task total.
+- [x] Report unresolved trucks separately, with no invented identifier.
+- [x] Define a static technical component inventory, marked explanatory and semantics-unverified, with no synthetic residual bucket.
+- [x] Run capability and policy gates before any executor access.
+- [x] Reject incomplete, truncated, duplicate, mismatched or population-inconsistent executor results.
+- [x] Validate every monetary field as decimal text, including reconciliation measures, and refuse a resolved truck group that claims missing-task records. Added by pre-commit review after both were reproduced.
+- [x] Preserve timeout and `SERVICE_BUSY` errors unchanged.
+- [!] Implement `truck` grouping SQL. Deferred to 7B: a month-filtered grouped statement still needs the access path FC-P17 leaves unresolved, so no bounded query can be proved safe yet.
+- [!] Implement `month` grouping. Blocked (FC-P19).
+- [!] Implement `costComponent` grouping. Blocked (FC-06, FC-07).
+- [!] Order by a monetary measure. Deferred to 7B: money must be ordered by SQL, never compared as decimal strings in JavaScript.
 
 Acceptance criteria:
 
-- [ ] Every breakdown reconciles to its corresponding summary representation.
-- [ ] Pagination and sorting are deterministic.
-- [ ] No task-level amount is multiplied by a one-to-many detail join.
-- [ ] Group-count, date-range, timeout and concurrency limits are enforced.
+- [x] Pagination and sorting are deterministic and reproducible.
+- [x] No task-level amount is multiplied by a one-to-many detail join.
+- [x] Group-count and date-range limits are enforced.
+- [x] A partial aggregation is never returned as complete.
 
 Suggested commit:
 
 ```text
-Add truck fixed-cost breakdown analytics
+Add gated truck fixed-cost breakdown contract and orchestration
+```
+
+### Slice 7B — Approved grouping semantics, reconciliation, query plans and activation
+
+Goal: prove the grouped queries and enable the public breakdown.
+
+**Cannot start until the blockers below are answered. None is resolvable by engineering.**
+
+- [!] Approve the date-range to cost-month mapping so a `month` grouping can define its buckets (FC-P19).
+- [!] Approve independent additivity of the component fields so `costComponent` can carry measures (FC-06, FC-07).
+- [!] Approve the `deleted` inclusion rule (FC-03), the reconciliation tolerance (FC-14) and the public current/locked exposure policy (FC-02).
+- [!] Accept an official ERP report and reference period (FC-11).
+- [!] Obtain a production-suitable access path for month-filtered grouping (FC-P17).
+- [ ] Add the bounded grouped statement with static unqualified identifiers, bound values, AnalyticsGate, configured timeout and limit-plus-sentinel protection.
+- [ ] Run and record `EXPLAIN` for every grouping query shape; a full `kastai_data` scan remains unacceptable for activation.
+- [ ] Add SQL-side ordering so a monetary sort field becomes available.
+- [ ] Add total-versus-breakdown reconciliation tests against the accepted reference.
+- [ ] Enable the truck breakdown capability only after every acceptance test passes.
+- [ ] Keep truck dimensions and all other scopes disabled.
+
+Acceptance criteria:
+
+- [ ] Every breakdown reconciles to its corresponding summary representation.
+- [ ] Every grouping query has an acceptable bounded plan.
+- [ ] Timeout and concurrency limits are enforced on the enabled path.
+- [ ] Existing `/vehicles`, invoice and schema endpoints remain unchanged.
+
+Suggested commit:
+
+```text
+Enable truck fixed-cost breakdown analytics
 ```
 
 ### Slice 8 — Truck dimensions endpoint
@@ -507,6 +543,7 @@ Truck monetary capability may be enabled only when every item below is complete:
 | 2026-09-23 | SLICE-5 | Authoritative total read from `kastai_fiksuoti_ataskaita` and never recomputed; detail tables are explanatory only; decimal-string contract; deleted-row policy fails closed. | `docs/costs-endpoint.md` section 17 | — |
 | 2026-09-23 | SLICE-5-FIX | Pre-commit corrections: null comparison fields for an empty comparable population, orphan-preserving `LEFT JOIN` with `missingTaskCount`, and explicit `dateBasis: kastai_data`. | `docs/costs-endpoint.md` section 17 | — |
 | 2026-09-23 | SLICE-6A | Summary contract and disabled orchestration; lock-state counters from the confirmed FCB-05 sentinel; `SERVICE_BUSY` preserved. Slice 6 split into 6A and 6B because its checklist mixed buildable work with unresolved approvals. | `docs/costs-endpoint.md` section 18 | — |
+| 2026-09-23 | SLICE-7A | Breakdown contract, grouping-availability registry, bounds, deterministic ordering and gated orchestration. No production SQL: a grouped month-filtered statement still depends on FC-P17. Slice 7 split into 7A and 7B. | `docs/costs-endpoint.md` section 19 | — |
 
 ### Reconciliation
 
@@ -544,6 +581,8 @@ Truck monetary capability may be enabled only when every item below is complete:
 | 2026-09-23 | Slice 5 corrections | Opt-in monetary integration, 2025-03 | Passed | Record counts unchanged by the LEFT JOIN; `missingTaskCount` 342 | — |
 | 2026-09-23 | Slice 6A | `npm test` | Passed | 148 unit tests, 0 failures (20 new summary tests) | — |
 | 2026-09-23 | Slice 6A review | `npm test` | Passed | 151 unit tests after adding period/request consistency validation and 3 regression tests | — |
+| 2026-09-23 | Slice 7A | `npm test` | Passed | 171 unit tests, 0 failures (20 new breakdown tests incl. mutation guards) | — |
+| 2026-09-23 | Slice 7A review | `npm test` | Passed | 173 unit tests after validating reconciliation decimals and refusing missing-task records on resolved groups | — |
 | 2026-09-23 | Slice 6A | Opt-in monetary integration, 2025-03 | Passed | Record counts unchanged by the lock-state counters; every `deleted = 0` record locked, every `deleted = 1` record unlocked | — |
 | 2026-09-23 | Baseline audit | `npm run test:integration` | Not run as a suite | `tests/integration/fixed-cost-diagnostics.test.ts` ran and skipped: opt-in `FIXED_COST_DIAGNOSTIC_TASK_IDS` absent. The remaining live tests were not run because they print ERP business rows. | — |
 | 2026-09-23 | Baseline audit | `git diff --check` | Passed | Checked for `docs/fixed-costs-status-2026-09-23.md` | — |

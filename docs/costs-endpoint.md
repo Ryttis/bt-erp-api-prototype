@@ -962,3 +962,82 @@ Not implemented and not claimed: the day-to-month mapping (FC-P19), multi-month 
 ### Coding gate status after Slice 6A
 
 Unchanged: **closed**. Production monetary aggregation stays disabled.
+
+## 19. Slice 7A — gated breakdown contract and orchestration
+
+Slice 7, like Slice 6, mixed work that can be built today with work that depends on unresolved approvals. It is split, and this section records **Slice 7A only**. Nothing here activates a capability, and no production SQL was added.
+
+### Implemented code
+
+| Artifact | Purpose |
+|---|---|
+| `src/fixed-costs/breakdown-contract.ts` | Strict request parsing, grouping-availability registry, sort/pagination bounds, response types and the static component inventory. |
+| `src/fixed-costs/breakdown-service.ts` | Gated orchestration: capability and policy gates, two independent reads, invariant checks, deterministic ordering and pagination. |
+| `tests/unit/fixed-cost-breakdown.test.ts` | 20 tests covering the contract, gates, bounds, ordering, orphans, errors and the route boundary. |
+
+### Request contract
+
+Accepted parameters are exactly `allocationScope`, `dateFrom`, `dateTo`, `groupBy`, `page`, `perPage`, `sortBy`, `sortDirection` and `truckIds`. Everything else — unknown or repeated parameters, arbitrary fields, measures, filter expressions, table or column names, SQL-shaped text, `representation`, deleted-row policy, tolerance and internal query limits — is rejected before anything else happens.
+
+Parameter names use the fixed-cost domain's own camelCase surface rather than the snake_case of the older `/vehicles` and `/invoices` domains. Both conventions already coexist in this repository; a breakdown request shares one query string with `allocationScope`, so matching the fixed-cost surface keeps a single request internally consistent. This is an engineering decision, recorded here because it is a visible deviation from the older endpoints.
+
+### Grouping availability
+
+Recognising a grouping is not the same as supporting it, and a blocked grouping is never silently treated as supported.
+
+| Grouping | Status | Basis or reason | Blockers |
+|---|---|---|---|
+| `truck` | Structurally supported, **not activated** | `uzdaviniai.uzdavinio_masina`, confirmed as the truck field (FCB-08 / FC-08) | FC-11, FC-14, FC-03, FC-02, FC-P17 |
+| `month` | **Blocked** | The date-range to cost-month mapping is unapproved, so month buckets cannot be defined | FC-P19 |
+| `costComponent` | **Blocked** | Independent additivity of the component fields is unapproved, so component groups cannot carry monetary measures | FC-06, FC-07 |
+
+The parser accepts all three as recognised values; the registry refuses the blocked two and the orchestration fails closed with the recorded blocker before any executor call.
+
+### Bounds, ordering and pagination
+
+Maximum page size 200 (default 50), maximum group count 1,000, and the existing 366-day maximum date range. Ordering is allowlisted to `truckId`, an immutable integer, with `truckId` ascending as the tie-breaker, so the order is total and pages tile the set exactly once with no overlap or gap.
+
+Monetary sort fields are deliberately **unavailable**: ordering by an amount would mean comparing decimal strings in JavaScript, so an amount sort requires SQL-side ordering and belongs to Slice 7B. A request for one is refused with `sort_field_unavailable`.
+
+A page beyond the last fails closed rather than returning an empty page, and a group count above the maximum fails closed rather than truncating.
+
+### Pre-commit review corrections
+
+A review of this slice found and closed two real defects, both reproduced before fixing:
+
+1. **Reconciliation money was not validated as decimal text.** Only `authoritativeTotal` was checked, so a JavaScript number supplied as `componentTotal`, `netDifference` or `grossAbsoluteDifference` passed straight into the response — breaking the decimal-string guarantee the whole slice rests on. All three are now validated, and a numeric, comma-formatted, exponent or boolean value fails closed.
+2. **A resolved truck group could silently drop its missing-task population.** `missingTaskCount` is surfaced only by the unresolved bucket, so a non-zero count on a resolved group vanished from the response entirely. Because truck resolution comes from `uzdaviniai.uzdavinio_masina`, a resolved truck implies its task row exists, so that combination is now refused rather than quietly discarded.
+
+A third, documentation-only fix: the `groupCount` field comment claimed it could exceed the returned rows, which is the opposite of what the code enforces.
+
+### Completeness
+
+The executor must prove it enumerated every group before pagination: a result that is `truncated`, not `complete`, or whose `groupCount` disagrees with its rows is refused with `incomplete_grouping`. A partial aggregation is never presented as complete. Duplicate groups, invalid identifiers, lock-state counts that do not cover the group, representation or period mismatches, and current/locked reads describing different group sets or populations are all rejected.
+
+### Authoritative totals and the component boundary
+
+Group amounts are the stored authoritative totals, copied as decimal text. The orchestration performs no monetary arithmetic and joins no detail table, so a one-to-many detail relationship cannot multiply a task total. A component total never stands in for an authoritative total, and the two remain separately visible in every response.
+
+`fixedCostComponentInventory` is a static technical inventory of the fifteen verified schema column names, sorted deterministically. It is explicitly marked `explanatory_semantics_unverified`, with `independentlyAdditive: false` and `syntheticResidualBucket: false`. No business category is mapped and there is deliberately no synthetic `other` bucket to force a reconciliation to balance.
+
+### Unresolved trucks
+
+Records whose truck cannot be resolved are reported in a separate `unresolved` bucket carrying `taskCount`, `missingTaskCount`, `zeroTruckCount` and its own amounts. It has no identifier field at all — never `0`, `-1`, `null` or `"unknown"` — and is never folded into a real truck's group. An executor row with an invalid identifier fails closed instead of being coerced.
+
+### No production SQL
+
+None was added. A truck grouping would still need the month-filtered summary access that FC-P17 leaves unresolved, so no bounded query can yet be proved safe for activation, and no `EXPLAIN` is claimed. The executor is an injection point, which keeps the orchestration fully unit-testable without giving the public route any path to the replica.
+
+### Route behaviour, unchanged
+
+All five capability registry entries remain disabled. A breakdown request shaped like the new contract still returns HTTP 422 `SEMANTICS_UNVERIFIED` with zero replica access; summary and dimensions are unchanged; every non-truck scope stays blocked. Breakdown-specific parameters are not part of the public parser, so they are refused with 400 `INVALID_QUERY` before the semantic gate. The registered fixed-cost route set is unchanged at exactly summary, breakdown and dimensions, and no diagnostic, reconciliation, monetary or grouping path exists.
+
+### Slice 7A status
+
+Implemented: request contract, grouping-availability registry, pagination and group bounds, deterministic ordering with an immutable tie-breaker, response contract, component inventory, gated orchestration, unresolved-truck handling, completeness safeguards, error propagation, and 22 unit tests including mutation guards and two review regressions.
+
+Not implemented and not claimed: any grouped production SQL or query plan, month and costComponent groupings, monetary ordering, reconciliation against an official ERP reference, and capability activation.
+
+### Coding gate status after Slice 7A
+
+Unchanged: **closed**. Production monetary aggregation stays disabled.
