@@ -5,6 +5,7 @@ import { AnalyticsGate } from '../../src/analytics-gate.js';
 import { buildApp } from '../../src/app.js';
 import { loadConfig } from '../../src/config.js';
 import type { ReplicaPool } from '../../src/db/replica.js';
+import { ApiError } from '../../src/errors.js';
 import { fixedCostSemanticCapabilities } from '../../src/fixed-costs/capabilities.js';
 import { fixedCostAllocationScopes } from '../../src/fixed-costs/contracts.js';
 import {
@@ -60,6 +61,9 @@ function groupRow(options: {
   multipleDetail?: number;
   missingTotal?: number;
   missingTask?: number;
+  locked?: number;
+  unlockedCount?: number;
+  unknownLock?: number;
   buckets?: Partial<Record<typeof fixedCostDifferenceBuckets[number], number>>;
   authoritativeTotal?: string | null;
   comparableAuthoritativeTotal?: string | null;
@@ -93,6 +97,10 @@ function groupRow(options: {
     multipleDetailRecords: multipleDetail,
     missingTotalRecords: missingTotal,
     missingTaskCount: options.missingTask ?? 0,
+    // Lock states must always cover the authoritative population (FCB-05).
+    lockedRecords: options.locked ?? 0,
+    unlockedRecords: options.unlockedCount ?? (authoritativeRecords - (options.locked ?? 0) - (options.unknownLock ?? 0)),
+    unknownLockRecords: options.unknownLock ?? 0,
   };
 }
 
@@ -197,7 +205,9 @@ test('current and locked read entirely separate authoritative columns and detail
   const current = fixedCostMonetaryStatement(parseFixedCostMonetaryQuery(baseQuery, now));
   const locked = fixedCostMonetaryStatement(parseFixedCostMonetaryQuery({ ...baseQuery, representation: 'locked' }, now));
   assert.match(current, /s\.kastaiVilkiko AS authoritative/);
-  assert.ok(!current.includes('locked_kastaiVilkiko'), 'Current never reads the locked amount');
+  // `locked_kastaiVilkiko_data` is task-level lock-event metadata shared by both
+  // representations; the locked *amount* column must never appear in a current read.
+  assert.ok(!/locked_kastaiVilkiko(?!_data)/.test(current), 'Current never reads the locked amount');
   assert.ok(!current.includes('kastai_fiksuoti_vilkikai_det_locked'), 'Current never reads the locked detail table');
   assert.match(locked, /s\.locked_kastaiVilkiko AS authoritative/);
   assert.match(locked, /FROM kastai_fiksuoti_vilkikai_det_locked d/);
@@ -212,7 +222,7 @@ test('current and locked read entirely separate authoritative columns and detail
 test('the authoritative total is read from the summary table and never recomputed from components', () => {
   const sql = fixedCostMonetaryStatement(parseFixedCostMonetaryQuery(baseQuery, now));
   // The authoritative value is a plain column read.
-  assert.match(sql, /SELECT a\.uzdavinys, a\.deleted, a\.kastaiVilkiko, t\.id AS taskId\s*\n\s*FROM kastai_fiksuoti_ataskaita a/);
+  assert.match(sql, /SELECT a\.uzdavinys, a\.deleted, a\.kastaiVilkiko, a\.locked_kastaiVilkiko_data, t\.id AS taskId\s*\n\s*FROM kastai_fiksuoti_ataskaita a/);
   assert.match(sql, /CAST\(SUM\(r\.authoritative\) AS CHAR\) AS authoritativeTotal/);
   // The component sum is a separate quantity and is never aliased as authoritative.
   assert.ok(!/componentSum\s*\)?\s*AS authoritative\b/.test(sql), 'Component sum is never the authoritative total');
@@ -411,7 +421,14 @@ test('execution runs through the analytics gate, respects saturation and sanitiz
   const busy = new AnalyticsGate(1, 0, 1000);
   const blocker = fixture(async () => { await setImmediate(); return [groupRow()]; });
   const held = busy.run(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
-  await assert.rejects(queryFixedCostMonetaryTotals(blocker.pool, busy, baseQuery, approved, now), FixedCostMonetaryError);
+  // Saturation stays a deterministic SERVICE_BUSY rather than being flattened into
+  // REPLICA_UNAVAILABLE, so callers can still distinguish busy from unavailable.
+  await assert.rejects(queryFixedCostMonetaryTotals(blocker.pool, busy, baseQuery, approved, now), (error: unknown) => {
+    assert.ok(error instanceof ApiError);
+    assert.equal(error.code, 'SERVICE_BUSY');
+    assert.equal(error.statusCode, 503);
+    return true;
+  });
   await held;
 
   for (const [driverCode, timeout] of [['ER_PARSE_ERROR', false], ['ER_STATEMENT_TIMEOUT', true], ['ER_QUERY_INTERRUPTED', true]] as const) {
@@ -444,8 +461,9 @@ test('the result carries no task IDs, truck identifiers, dates or raw rows', asy
   for (const group of result.groups) {
     assert.deepEqual(Object.keys(group).sort(), [
       'affectedRecords', 'authoritativeRecords', 'authoritativeTotal', 'buckets', 'comparableAuthoritativeTotal',
-      'comparableRecords', 'componentTotal', 'deletedState', 'grossAbsoluteDifference', 'missingTaskCount',
-      'missingTotalRecords', 'multipleDetailRecords', 'netDifference', 'noDetailRecords', 'reconciliationStatus',
+      'comparableRecords', 'componentTotal', 'deletedState', 'grossAbsoluteDifference', 'lockedRecords',
+      'missingTaskCount', 'missingTotalRecords', 'multipleDetailRecords', 'netDifference', 'noDetailRecords',
+      'reconciliationStatus', 'unknownLockRecords', 'unlockedRecords',
     ]);
   }
   assert.equal(result.meta.currency, 'EUR');
@@ -463,7 +481,7 @@ test('mutation: the safety guards fail when sources, totals, bounds or the polic
 
   const separationGuard = (sql: string, representation: 'current' | 'locked') => {
     if (representation === 'current') {
-      assert.ok(!sql.includes('locked_kastaiVilkiko'), 'current reads no locked amount');
+      assert.ok(!/locked_kastaiVilkiko(?!_data)/.test(sql), 'current reads no locked amount');
       assert.ok(!sql.includes('kastai_fiksuoti_vilkikai_det_locked'), 'current reads no locked detail');
     } else {
       assert.ok(!/FROM kastai_fiksuoti_vilkikai_det d/.test(sql), 'locked reads no current detail');
@@ -637,8 +655,12 @@ test('the task join is always a LEFT JOIN so orphan summary rows stay in the pop
     assert.ok(sql.indexOf('ORDER BY a.uzdavinys', where) > where);
   }
   // Orphans are never given an invented truck identity.
-  assert.ok(!/uzdavinio_masina\s*,\s*0\)|IFNULL\(t\.|COALESCE\(t\./.test(unfiltered), 'No invented truck fallback');
-  assert.ok(!/'unknown'|'orphan'/i.test(unfiltered));
+  assert.ok(!/IFNULL\(t\.|COALESCE\(t\.|NULLIF\(t\.uzdavinio_masina/.test(unfiltered), 'No invented truck fallback');
+  // No truck is labelled with a placeholder identity. (`'unknown'` does appear, but
+  // only as a lock-state category for a date the confirmed sentinel cannot classify.)
+  assert.ok(!/uzdavinio_masina[^,\n]*'(unknown|orphan|none|n\/a)'/i.test(unfiltered), 'No placeholder truck identity');
+  assert.ok(!/'orphan'/i.test(unfiltered));
+  assert.match(unfiltered, /THEN 'unknown' END AS lockState|ELSE 'unknown' END AS lockState/, 'unknown is a lock state, not a truck');
   // missingTaskCount is derived from the unmatched task, not from a filter.
   assert.match(unfiltered, /SUM\(CASE WHEN r\.taskId IS NULL THEN 1 ELSE 0 END\) AS missingTaskCount/);
 });
@@ -715,9 +737,11 @@ test('both representations filter the reporting period on the cost month and say
     fixedCostMonetaryStatement(parseFixedCostMonetaryQuery({ ...baseQuery, representation }, now)));
   for (const sql of statements) {
     assert.match(sql, /WHERE a\.kastai_data >= \? AND a\.kastai_data < \?/, 'Period filter is the cost month');
-    // The lock date is never the reporting-period filter.
-    assert.ok(!/WHERE[^;]*locked_kastaiVilkiko_data/.test(sql), 'Lock date is not a period filter');
-    assert.ok(!/locked_kastaiVilkiko_data\s*(>=|<|>|<=)\s*\?/.test(sql), 'Lock date is never bound as a period bound');
+    // The lock date may be read as lock-state metadata, but never compared, ranged
+    // or bound as a reporting period.
+    assert.ok(!/locked_kastaiVilkiko_data\s*(>=|<=|<|>)/.test(sql), 'Lock date is never a range bound');
+    assert.ok(!/WHERE[^()]*locked_kastaiVilkiko_data\s*(>=|<=|<|>|=)\s*\?/.test(sql), 'Lock date is never a bound period predicate');
+    assert.equal((sql.match(/\?/g) ?? []).length, 2, 'Only the two cost-month bounds are bound');
   }
   // Both representations use the identical period predicate.
   const predicate = /WHERE a\.\w+ >= \? AND a\.\w+ < \?/;

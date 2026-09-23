@@ -68,6 +68,9 @@ test('opt-in bounded internal truck fixed-cost monetary aggregation', { skip: re
             noDetailRecords: group.noDetailRecords,
             multipleDetailRecords: group.multipleDetailRecords,
             missingTotalRecords: group.missingTotalRecords,
+            lockedRecords: group.lockedRecords,
+            unlockedRecords: group.unlockedRecords,
+            unknownLockRecords: group.unknownLockRecords,
             buckets: group.buckets,
           })),
         };
@@ -92,6 +95,10 @@ test('opt-in bounded internal truck fixed-cost monetary aggregation', { skip: re
             assert.match(group.authoritativeTotal!, /^-?\d+\.\d{1,6}$/, 'The real authoritative total survives');
           }
           assert.ok(group.missingTaskCount <= group.authoritativeRecords, 'Missing-task count within the population');
+          assert.equal(
+            group.lockedRecords + group.unlockedRecords + group.unknownLockRecords,
+            group.authoritativeRecords, 'Lock states cover the population',
+          );
         }
       } catch (error) {
         if (!(error instanceof FixedCostMonetaryTruncated)) throw error;

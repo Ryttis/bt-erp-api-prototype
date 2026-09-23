@@ -1,6 +1,6 @@
 import type { AnalyticsGate } from '../analytics-gate.js';
 import { queryReadOnly, ReplicaDiagnosticError, type ReplicaPool } from '../db/replica.js';
-import { isQueryTimeout } from '../errors.js';
+import { ApiError, isQueryTimeout } from '../errors.js';
 import {
   assertApprovedDeletedRowPolicy, assertDecimalString, emptyFixedCostBucketCounts,
   fixedCostAuthoritativeSource, fixedCostBreakdownSources, fixedCostDeletedStates,
@@ -39,6 +39,10 @@ const componentSum = (alias: string) => fixedCostComponentFields.map(column => `
 const authoritativeColumn = { current: 'kastaiVilkiko', locked: 'locked_kastaiVilkiko' } as const;
 
 const decimalText = (expression: string, alias: string) => `CAST(${expression} AS CHAR) AS ${alias}`;
+
+/** Strict calendar-date text; zero and partial-zero dates never classify as valid. */
+const validLockDate = (date: string) => `(CAST(${date} AS CHAR) REGEXP '^[1-9][0-9]{3}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$'
+      AND CAST(RIGHT(CAST(${date} AS CHAR), 2) AS UNSIGNED) <= DAY(LAST_DAY(CONCAT(LEFT(CAST(${date} AS CHAR), 7), '-01'))))`;
 
 /**
  * Sums a value over comparable records only, yielding SQL NULL — never zero — when
@@ -94,7 +98,10 @@ function buildStatement(representation: FixedCostRepresentation, truckPlaceholde
     SUM(CASE WHEN r.authoritative IS NOT NULL AND r.detailRows = 0 THEN 1 ELSE 0 END) AS noDetailRecords,
     SUM(CASE WHEN r.authoritative IS NOT NULL AND r.detailRows > 1 THEN 1 ELSE 0 END) AS multipleDetailRecords,
     SUM(CASE WHEN r.authoritative IS NULL THEN 1 ELSE 0 END) AS missingTotalRecords,
-    SUM(CASE WHEN r.taskId IS NULL THEN 1 ELSE 0 END) AS missingTaskCount
+    SUM(CASE WHEN r.taskId IS NULL THEN 1 ELSE 0 END) AS missingTaskCount,
+    SUM(CASE WHEN r.lockState = 'unlocked' THEN 1 ELSE 0 END) AS unlockedRecords,
+    SUM(CASE WHEN r.lockState = 'locked' THEN 1 ELSE 0 END) AS lockedRecords,
+    SUM(CASE WHEN r.lockState = 'unknown' THEN 1 ELSE 0 END) AS unknownLockRecords
   FROM (
     SELECT
       CASE WHEN j.deleted = 0 THEN 'zero' WHEN j.deleted = 1 THEN 'one' ELSE 'other' END AS deletedState,
@@ -102,14 +109,20 @@ function buildStatement(representation: FixedCostRepresentation, truckPlaceholde
       j.componentSum,
       j.detailRows,
       j.taskId,
+      -- ERP confirmed on 2026-09-23 (FCB-05) that '0000-00-00' marks an unlocked
+      -- truck result. Any other unusable date stays 'unknown' rather than being
+      -- guessed in either direction.
+      CASE WHEN j.lockDate IS NULL THEN 'unknown'
+        WHEN CAST(j.lockDate AS CHAR) = '0000-00-00' THEN 'unlocked'
+        WHEN ${validLockDate('j.lockDate')} THEN 'locked' ELSE 'unknown' END AS lockState,
       CASE WHEN j.authoritative IS NOT NULL AND j.detailRows = 1 AND j.componentSum IS NOT NULL THEN 1 ELSE 0 END AS comparable
     FROM (
-      SELECT s.deleted, s.taskId,
+      SELECT s.deleted, s.taskId, s.locked_kastaiVilkiko_data AS lockDate,
         ${authoritative} AS authoritative,
         (SELECT COUNT(*) FROM ${detailTable} d WHERE d.uzdavinys = s.uzdavinys) AS detailRows,
         (SELECT SUM(${componentSum('d')}) FROM ${detailTable} d WHERE d.uzdavinys = s.uzdavinys) AS componentSum
       FROM (
-        SELECT a.uzdavinys, a.deleted, a.${authoritativeColumn[representation]}, t.id AS taskId
+        SELECT a.uzdavinys, a.deleted, a.${authoritativeColumn[representation]}, a.locked_kastaiVilkiko_data, t.id AS taskId
         FROM kastai_fiksuoti_ataskaita a
         LEFT JOIN uzdaviniai t ON t.id = a.uzdavinys
         WHERE a.kastai_data >= ? AND a.kastai_data < ?${truckFilter}
@@ -186,6 +199,9 @@ function projectGroup(row: Record<string, unknown>): FixedCostMonetaryGroup {
   const missingTotalRecords = counter(row, 'missingTotalRecords');
   const affectedRecords = counter(row, 'affectedRecords');
   const missingTaskCount = counter(row, 'missingTaskCount');
+  const lockedRecords = counter(row, 'lockedRecords');
+  const unlockedRecords = counter(row, 'unlockedRecords');
+  const unknownLockRecords = counter(row, 'unknownLockRecords');
 
   // Every comparable record is bucketed exactly once, and the structural classes
   // plus the comparable set must account for the whole authoritative population.
@@ -199,6 +215,9 @@ function projectGroup(row: Record<string, unknown>): FixedCostMonetaryGroup {
   }
   if (missingTaskCount > authoritativeRecords) {
     throw new InvalidFixedCostMonetaryResult('Missing-task records exceed the authoritative population');
+  }
+  if (lockedRecords + unlockedRecords + unknownLockRecords !== authoritativeRecords) {
+    throw new InvalidFixedCostMonetaryResult('Lock states do not cover the authoritative population');
   }
 
   const comparison = {
@@ -238,6 +257,9 @@ function projectGroup(row: Record<string, unknown>): FixedCostMonetaryGroup {
     multipleDetailRecords,
     missingTotalRecords,
     missingTaskCount,
+    lockedRecords,
+    unlockedRecords,
+    unknownLockRecords,
   };
 }
 
@@ -266,6 +288,9 @@ export async function queryFixedCostMonetaryTotals(
   try {
     rows = await gate.run(() => queryReadOnly<Record<string, unknown>[]>(pool, statement, values));
   } catch (error) {
+    // Analytics-gate saturation is already a deterministic, sanitized ApiError.
+    // Wrapping it would flatten SERVICE_BUSY into REPLICA_UNAVAILABLE.
+    if (error instanceof ApiError) throw error;
     throw new FixedCostMonetaryError(error);
   }
 

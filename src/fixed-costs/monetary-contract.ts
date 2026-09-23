@@ -235,6 +235,15 @@ export interface FixedCostMonetaryGroup {
   missingTotalRecords: number;
   /** Records of this state whose task is absent from `uzdaviniai`. */
   missingTaskCount: number;
+  /**
+   * Declared lock state, from the ERP-confirmed sentinel (FCB-05): a
+   * `locked_kastaiVilkiko_data` of `0000-00-00` means the truck result is not
+   * locked. Any other unusable date is counted as `unknownLockRecords` rather than
+   * guessed in either direction. The three always cover `authoritativeRecords`.
+   */
+  lockedRecords: number;
+  unlockedRecords: number;
+  unknownLockRecords: number;
 }
 
 export interface FixedCostMonetaryResult {

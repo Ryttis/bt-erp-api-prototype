@@ -216,25 +216,59 @@ Suggested commit:
 Add truck fixed-cost monetary repository
 ```
 
-### Slice 6 — Truck summary endpoint
+### Slice 6A — Truck summary contract and disabled orchestration
 
-Goal: enable the first reconciled public monetary result.
+Goal: build the smallest reusable summary layer, with no capability activation.
 
-- [ ] Finalize the summary request contract.
-- [ ] Support `allocationScope=truck` with paired `dateFrom` and `dateTo`.
-- [ ] Add only reconciled summary filters.
-- [ ] Return current amount, locked amount and the approved currency separately.
-- [ ] Return total, locked and unlocked task counts.
-- [ ] Return `sourceFamily`, `amountSemantics`, `dateBasis`, `semanticsVersion`, `reconciliationStatus`, `complete` and `limitations` metadata.
-- [ ] Add deterministic stable output ordering where collections occur.
-- [ ] Add success, empty-result, timeout and busy-response tests.
-- [ ] Add integration reconciliation coverage for the selected 2025 month.
-- [ ] Enable only the truck summary capability after all acceptance tests pass.
+Entry condition: none beyond Slice 5. Nothing in this slice depends on an unresolved approval, because nothing in it is publicly reachable.
+
+- [x] Finalize the public summary request contract: `allocationScope=truck` plus a paired `dateFrom`/`dateTo`, with unknown, repeated and SQL-shaped input rejected and the 366-day maximum preserved. Evidence: `src/fixed-costs/summary-contract.ts`; `tests/unit/fixed-cost-summary.test.ts`.
+- [x] Define the future summary response with current and locked kept separate, decimal-string or null amounts, and total/locked/unlocked/unknown counts.
+- [x] Define metadata: `sourceFamily`, `amountSemantics`, `dateBasis`, `semanticsVersion`, `reconciliationStatus`, `complete`, `limitations`, representation block and orphan information.
+- [x] Add deterministic stable ordering for every emitted collection, including limitations.
+- [x] Add internal orchestration calling the monetary repository independently per representation, behind an injected executor.
+- [x] Count declared lock state from the ERP-confirmed `0000-00-00` sentinel (FCB-05), with an explicit `unknown` class rather than a guess.
+- [x] Preserve the `SERVICE_BUSY` distinction through the repository instead of flattening gate saturation.
+- [x] Prove the route boundary: a valid truck summary request still returns 422 with zero replica access, and no new HTTP or CLI path exists.
+- [x] Validate injected cost months against the request: canonical `YYYY-MM-01` and overlapping the requested range, so a response can never describe a period other than its own data. Necessary conditions only; FC-P19 stays open.
+- [!] Resolve the day-range to cost-month mapping. Blocked (FC-P19): `planTruckFixedCostSummaryPeriod` reports the blocker instead of inventing inclusivity, partial-month or multi-month rules.
+- [!] Support a period spanning more than one cost month. Blocked: month totals cannot be added without JavaScript decimal arithmetic.
+
+Acceptance criteria:
+
+- [x] Current and locked values are never crossed, added or substituted.
+- [x] Authoritative totals are never derived from component sums.
+- [x] Reconciliation differences are never netted away; the gross absolute figure is preserved.
+- [x] Structurally non-comparable populations keep their real total with null comparisons.
+- [x] No replica access occurs without an injected approved deleted-row policy.
+- [x] Existing `/vehicles`, invoice and schema routes remain registered and unchanged.
+
+Suggested commit:
+
+```text
+Add truck fixed-cost summary contract and gated orchestration
+```
+
+### Slice 6B — Reconciliation, performance approval and capability activation
+
+Goal: satisfy the activation criteria and enable the first public monetary result.
+
+**This slice cannot start until the blockers below are answered. None may be resolved by engineering.**
+
+- [!] Accept an official ERP report and reference month, then reconcile against it (FC-11, FC-P01, FC-P02).
+- [!] Approve the reconciliation tolerance (FC-14, FC-P04).
+- [!] Approve the `deleted` inclusion rule (FC-03, FC-P03).
+- [!] Approve the public current-versus-locked exposure policy (FC-02, FC-P12).
+- [!] Approve the day-range to cost-month mapping (FC-P19).
+- [!] Obtain a production-suitable access path for month filtering; `kastai_data` is unindexed and a month currently scans approximately 1.56 million summary rows (FC-P17).
+- [ ] Add success, empty-result, timeout and busy-response tests against the enabled path.
+- [ ] Add integration reconciliation coverage for the accepted reference month.
+- [ ] Enable only the truck summary capability after every acceptance test passes.
 - [ ] Keep truck breakdown, truck dimensions and all other scopes disabled.
 
 Acceptance criteria:
 
-- [ ] The selected closed-period API result matches the accepted ERP reference.
+- [ ] The accepted closed-period API result matches the official ERP reference.
 - [ ] Recent/unlocked ranges cannot be mistaken for final locked results.
 - [ ] No unsupported filter or measure reaches the repository.
 - [ ] Existing `/vehicles`, invoice and schema endpoints remain unchanged.
@@ -458,6 +492,7 @@ Truck monetary capability may be enabled only when every item below is complete:
 | FC-P16 | Rounding rule behind the sub-euro residual between the component sum and the stored total (FC-06, FC-07) | ERP / Finance | Slice 5 and all monetary work | Open, narrowed: 0 of 116,678 comparable rows exceed 1.00 EUR; 43.33% exceed 0.01 EUR |
 | FC-P17 | Index or alternative access path for month-filtered production queries | ERP DBA / API owner | Public endpoint performance | Open: `kastai_fiksuoti_ataskaita.kastai_data` is unindexed. A full month runs in ~2 s today, which does not make the plan production-ready. |
 | FC-P18 | Inclusion rule for summary rows whose task is absent from `uzdaviniai` | ERP / Finance | Production queries | Open: 105 and 78 such rows in the two probes |
+| FC-P19 | Day-range to cost-month mapping: `dateTo` inclusivity, partial-month treatment and multi-month spans | Finance / BA | Slice 6B activation | Open: the summary contract accepts calendar days, the repository is scoped to a whole cost month, and no rule connects them |
 
 ## 12. Evidence and completion log
 
@@ -471,6 +506,7 @@ Truck monetary capability may be enabled only when every item below is complete:
 | 2026-09-23 | SLICE-4B | Magnitude buckets, sentinel correction and count-based quarterly/yearly aggregation added; 24-month sweep shows no comparable task above 1.00 EUR, superseding the earlier additivity reading. | `docs/costs-endpoint.md` section 16 | — |
 | 2026-09-23 | SLICE-5 | Authoritative total read from `kastai_fiksuoti_ataskaita` and never recomputed; detail tables are explanatory only; decimal-string contract; deleted-row policy fails closed. | `docs/costs-endpoint.md` section 17 | — |
 | 2026-09-23 | SLICE-5-FIX | Pre-commit corrections: null comparison fields for an empty comparable population, orphan-preserving `LEFT JOIN` with `missingTaskCount`, and explicit `dateBasis: kastai_data`. | `docs/costs-endpoint.md` section 17 | — |
+| 2026-09-23 | SLICE-6A | Summary contract and disabled orchestration; lock-state counters from the confirmed FCB-05 sentinel; `SERVICE_BUSY` preserved. Slice 6 split into 6A and 6B because its checklist mixed buildable work with unresolved approvals. | `docs/costs-endpoint.md` section 18 | — |
 
 ### Reconciliation
 
@@ -506,6 +542,9 @@ Truck monetary capability may be enabled only when every item below is complete:
 | 2026-09-23 | Slice 5 | `npm run test:integration` | Passed with known flake | Same pre-existing `live invoices` drift; 1 of 2 runs | — |
 | 2026-09-23 | Slice 5 corrections | `npm test` | Passed | 128 unit tests, 0 failures (30 monetary, incl. 8 mutation guards) | — |
 | 2026-09-23 | Slice 5 corrections | Opt-in monetary integration, 2025-03 | Passed | Record counts unchanged by the LEFT JOIN; `missingTaskCount` 342 | — |
+| 2026-09-23 | Slice 6A | `npm test` | Passed | 148 unit tests, 0 failures (20 new summary tests) | — |
+| 2026-09-23 | Slice 6A review | `npm test` | Passed | 151 unit tests after adding period/request consistency validation and 3 regression tests | — |
+| 2026-09-23 | Slice 6A | Opt-in monetary integration, 2025-03 | Passed | Record counts unchanged by the lock-state counters; every `deleted = 0` record locked, every `deleted = 1` record unlocked | — |
 | 2026-09-23 | Baseline audit | `npm run test:integration` | Not run as a suite | `tests/integration/fixed-cost-diagnostics.test.ts` ran and skipped: opt-in `FIXED_COST_DIAGNOSTIC_TASK_IDS` absent. The remaining live tests were not run because they print ERP business rows. | — |
 | 2026-09-23 | Baseline audit | `git diff --check` | Passed | Checked for `docs/fixed-costs-status-2026-09-23.md` | — |
 

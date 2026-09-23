@@ -895,3 +895,70 @@ Intentionally deferred: trailer, department, support and expedition monetary rep
 ### Coding gate status after Slice 5
 
 Unchanged: **closed**. Production monetary aggregation stays disabled and all five allocation scopes remain behind `SEMANTICS_UNVERIFIED`.
+
+## 18. Slice 6A — truck summary contract and disabled orchestration
+
+Slice 6 was too large to be a single step: its checklist mixed a contract that can be written today with an activation that depends on unresolved Finance/ERP approvals. It is therefore split, and this section records **Slice 6A only**. Nothing here activates a capability.
+
+### Implemented code
+
+| Artifact | Purpose |
+|---|---|
+| `src/fixed-costs/summary-contract.ts` | Public truck-summary request parsing, the future response shape, stable limitation ordering, and the period-plan seam. |
+| `src/fixed-costs/summary-service.ts` | Internal orchestration that assembles a summary from two independent monetary reads behind an injected executor. |
+| `src/fixed-costs/monetary-repository.ts` | Extended with declared lock-state counters and a `SERVICE_BUSY` passthrough. |
+| `src/fixed-costs/monetary-contract.ts` | `lockedRecords`, `unlockedRecords` and `unknownLockRecords` added to the group type. |
+| `tests/unit/fixed-cost-summary.test.ts` | 20 tests covering the contract, orchestration, gates and route boundary. |
+
+#### Request contract
+
+Allowed public input is exactly `allocationScope=truck` plus a paired `dateFrom` and `dateTo`. `parseTruckFixedCostSummaryRequest` reuses the shared parser, so unknown parameters, repeated query parameters (Fastify yields an array, which is not a string), non-canonical dates, reversed ranges and the existing 366-day maximum are all still enforced; summary additionally requires the scope to be `truck` and both dates to be present. No `representation`, deleted-row policy, tolerance, table, field, grouping, sorting, pagination, SQL fragment or internal limit is accepted.
+
+#### Response contract
+
+The future successful response keeps the two representations apart throughout: `currentAmount` and `lockedAmount` are separate decimal strings or `null`, and per-representation reconciliation carries `comparableAuthoritativeTotal`, `componentTotal`, `netDifference`, `grossAbsoluteDifference`, the Slice 4 buckets and the structural counters. Counts are `totalTaskCount`, `lockedTaskCount`, `unlockedTaskCount` and `unknownLockStateTaskCount`. Metadata carries `sourceFamily`, `authoritativeSource`, `breakdownSources`, `amountSemantics`, `dateBasis`, `semanticsVersion` (null), `classificationApplied`/`classificationVersion` (false/null), `reconciliationStatus`, the representation block, `periodMonths`, `complete`, `missingTaskCount`, the deleted-row policy, pending approvals and `limitations`. Every collection is deterministically ordered; `orderFixedCostLimitations` sorts and de-duplicates, so ordering never depends on insertion.
+
+A standing limitation states that current amounts are live calculations ERP may recalculate for roughly three months (FCB-10) and are **not** final results.
+
+#### Orchestration
+
+`summarizeTruckFixedCosts` calls an injected executor twice, once per representation, and never reuses one result for the other. It fails closed when the repository answers with a mismatched representation, period, scope, currency, date basis or breakdown source. Authoritative totals are copied from the stored total and never from a component sum. Net and gross differences are both preserved, so a netted-to-zero month still shows its gross exposure. Structurally non-comparable populations keep their real authoritative total with null comparison fields. An incomplete or truncated repository result never becomes a summary. Nothing is logged.
+
+#### Lock-state counters (new, from a confirmed fact)
+
+`lockedTaskCount` and `unlockedTaskCount` could not be derived from the Slice 5 repository, so it now counts declared lock state directly from the ERP-confirmed sentinel (FCB-05): `locked_kastaiVilkiko_data = '0000-00-00'` is `unlocked`, a strict calendar date is `locked`, and anything else is `unknown` rather than guessed. The three always cover the population, enforced in SQL projection and again in the service. This uses only confirmed semantics and invents no rule.
+
+The lock **date** is read for both representations because lock state is a task-level property, not a property of an amount. The locked **amount** column is still never read by a current query, and the locked detail table is still never joined by a current query — the unit guards now assert that precisely with `locked_kastaiVilkiko(?!_data)` rather than a prefix match.
+
+### Engineering decisions
+
+- Injected cost months are validated against the request by `assertSummaryPeriodMonths`: each must be canonical `YYYY-MM-01` and must share at least one day with the requested range. Both are necessary conditions under any eventual mapping rule, so neither decides `dateTo` inclusivity, partial-month treatment, nor which of several overlapping months belong in a result. Without this a response could echo one date range while reporting another period's money; a pre-commit review reproduced exactly that, and the check closed it.
+- The day-range to cost-month mapping is **not** implemented. `planTruckFixedCostSummaryPeriod` always reports `month_mapping_unapproved` against blocker FC-P19. The public contract accepts calendar days while the repository is scoped to a whole cost month, and no rule defines whether `dateTo` is inclusive, whether a partial month is included, excluded or pro-rated, or whether a range may span months. Inventing any of those would fabricate a financial rule, so the orchestrator takes its months from an internal caller instead.
+- Multi-month aggregation is refused: adding month totals would require decimal arithmetic in JavaScript, which this layer will not do.
+- A `separate_by_state` policy cannot collapse to one amount and fails closed; `include_all` fails closed as soon as more than one state is populated, for the same decimal-safety reason. Only `exclude_deleted` yields a single amount, by selecting the `deleted = 0` group with no arithmetic at all.
+- Analytics-gate saturation is now re-thrown unchanged instead of being wrapped, so `SERVICE_BUSY`/503 survives and is no longer flattened into `REPLICA_UNAVAILABLE`. Timeouts remain `QUERY_TIMEOUT`/504.
+
+### Bounded live verification (2026-09-23)
+
+The extended repository was re-run against 2025-03 through the opt-in integration test. Record counts are **identical** to the pre-change run (21,158 total; 20,795 in `deleted = 0`; 363 in `deleted = 1`), confirming the lock-state addition altered no population.
+
+| Declared state | Records | Locked | Unlocked | Unknown lock |
+|---|---:|---:|---:|---:|
+| `zero` | 20,795 | 20,795 | 0 | 0 |
+| `one` | 363 | 0 | 363 | 0 |
+
+The distribution is identical for both representations, as expected for a task-level property. In this month deletion and lock state were perfectly complementary: every non-deleted record was locked and every deleted record was unlocked, with no unreadable lock date. **That is a measurement of one month, not an approved rule**, and it does not resolve FC-02 or FC-03.
+
+### Route behaviour, unchanged
+
+All five capability registry entries remain disabled. A syntactically valid truck summary request — the exact shape the new contract accepts — still returns HTTP 422 `SEMANTICS_UNVERIFIED` with zero replica access, as do breakdown, dimensions and every other scope. No summary, monetary, reconciliation or diagnostic HTTP or CLI path exists, and the registered fixed-cost route set is unchanged at exactly summary, breakdown and dimensions.
+
+### Slice 6A status
+
+Implemented: request contract, response contract, orchestration, lock-state counters, stable ordering, policy and period gates, period/request consistency validation, route-boundary proof, and 23 unit tests including mutation-style guards.
+
+Not implemented and not claimed: the day-to-month mapping (FC-P19), multi-month aggregation, capability activation, an accepted ERP-reference reconciliation (FC-11), an approved tolerance (FC-14), an approved deleted-row inclusion rule (FC-03), an approved public current-versus-locked exposure policy (FC-02), and a production-suitable query plan (FC-P17).
+
+### Coding gate status after Slice 6A
+
+Unchanged: **closed**. Production monetary aggregation stays disabled.
