@@ -239,33 +239,42 @@ Production monetary aggregation for a scope may be enabled only when all boxes b
 | 2026-09-22 | Do not sum current and `_locked` detail tables. | Parallel schemas and differing row counts show alternative representations. | Pending ERP confirmation | Safety rule active |
 | 2026-09-22 | Use `kastai_fiksuoti_ataskaita` as the leading source candidate for diagnostic reconciliation. | One-row-per-task structure with current and locked scope totals. | Pending reconciliation | Candidate |
 | 2026-09-22 | Slice 1 recognizes only `allocationScope` and optional paired, bounded ISO dates. It rejects grouping, dimensions, pagination, sorting, filters, measures and field selection until MP-40/41 mappings are approved. | `src/fixed-costs/contracts.ts`; route-level validation tests. | Engineering safety decision; BA approval pending | Active |
+| 2026-09-23 | Record ERP developer business confirmations FCB-01 to FCB-12 as a distinct dated evidence class, separate from schema facts and replica measurements. | ERP developer statements, section 15. | ERP developer | Confirmed |
+| 2026-09-23 | Reconcile only months starting at least six months before the current month. | Doubles the FCB-10 three-month recalculation window as a conservative margin. | Engineering safety decision; Finance bound not approved | Active |
+| 2026-09-23 | Classify decimal differences with a 0.01 EUR tolerance. | Stored `decimal(13,2)` scale; applied as exact SQL decimal arithmetic. | Implementation safety value; pending Finance approval under FC-14 | Active |
+| 2026-09-23 | Do not infer which component subset composes the stored truck total. | Section 15 shows the full 15-component sum fails for ~45-48% of probed tasks; selecting a matching subset would manufacture a business rule. | Engineering safety decision | Active |
+| 2026-09-23 | Classify absolute differences into six magnitude buckets in SQL decimal arithmetic, reporting comparable, all-sampled and relative-to-exact denominators. | Section 16; bucket ladder generated from one shared constant. | Engineering decision; bucket names carry no Finance judgement | Active |
+| 2026-09-23 | Exclude the truncation sentinel from every counter while preserving the `LIMIT 5001` hard bound. | `ROW_NUMBER()` gate; metadata separates `taskLimit`, `sampledTaskCount` and `fetchedTaskCount`. | Engineering correction | Active |
+| 2026-09-23 | Aggregate quarters and years by summing counts before deriving percentages; never average monthly percentages. | Pure tested aggregation function. | Engineering decision | Active |
 
 ## 8. Open questions
 
 | ID | Question | Owner | Blocking production totals? | Status |
 |---|---|---|---|---|
-| FC-01 | Is `kastai_fiksuoti_ataskaita` authoritative, or is `uzdaviniai` the authoritative repeated representation? | ERP/BA | Yes | Open |
-| FC-02 | When must current versus locked values be used? | ERP/Finance | Yes | Open |
+| FC-01 | Is `kastai_fiksuoti_ataskaita` authoritative, or is `uzdaviniai` the authoritative repeated representation? | ERP/BA | Yes | Confirmed 2026-09-23 (FCB-01, FCB-02): `kastai_fiksuoti_ataskaita` holds the calculated task-level results; `kastaivilkikai` is configuration input. |
+| FC-02 | When must current versus locked values be used? | ERP/Finance | Yes | Partly: FCB-05 defines lock state and FCB-09 confirms ERP displays both separately. The API selection/exposure rule is still an open contract decision. |
 | FC-03 | Does `deleted = 0` define reportable summary rows? | ERP/Finance | Yes | Open |
-| FC-04 | Which date controls reporting? | Finance | Yes | Open |
-| FC-05 | Are all fixed costs implicitly in EUR or already converted? | Finance/ERP | Yes | Open |
-| FC-06 | Do task summary totals reconcile to the sum of detail components? | ERP/Finance | Yes | Open |
-| FC-07 | Which component columns are independently additive? | ERP/Finance | Yes | Open |
-| FC-08 | Should truck reporting use `uzdavinio_masina` or `uzd_vilk_vaziavo`? | ERP/BA | Yes for truck grouping | Open |
+| FC-04 | Which date controls reporting? | Finance | Yes | Confirmed 2026-09-23 (FCB-06): `kastai_data` is the cost month. |
+| FC-05 | Are all fixed costs implicitly in EUR or already converted? | Finance/ERP | Yes | Confirmed 2026-09-23 (FCB-07): EUR. |
+| FC-06 | Do task summary totals reconcile to the sum of detail components? | ERP/Finance | Yes | Open, narrowed: section 16 measures every comparable task within 1.00 EUR across 24 months, with 56.68% within 0.01 EUR. Additivity holds at euro scale; the sub-euro residual rule is unapproved. |
+| FC-07 | Which component columns are independently additive? | ERP/Finance | Yes | Open: the full 15-component sum reproduces the stored total within 1.00 EUR for every comparable task. No subset was tried and none is proposed. |
+| FC-08 | Should truck reporting use `uzdavinio_masina` or `uzd_vilk_vaziavo`? | ERP/BA | Yes for truck grouping | Confirmed 2026-09-23 (FCB-08): `uzdavinio_masina`. |
 | FC-09 | Should trailer reporting use `uzdavinio_priekaba` or `uzd_pr_vaziavo`? | ERP/BA | Yes for trailer grouping | Open |
 | FC-10 | How are tasks attributed when historical department intervals overlap or are missing? | ERP/BA | Yes for department grouping | Open |
 | FC-11 | Which ERP report and closed period will be used for reconciliation? | Finance | Yes | Open |
-| FC-12 | What do `uzdaviniai.kastaiVilkiko`, `kastai_fiksuoti_ataskaita.kastaiVilkiko` and `locked_kastaiVilkiko` each represent? | ERP/BA | Yes | Open |
+| FC-12 | What do `uzdaviniai.kastaiVilkiko`, `kastai_fiksuoti_ataskaita.kastaiVilkiko` and `locked_kastaiVilkiko` each represent? | ERP/BA | Yes | Confirmed 2026-09-23 (FCB-03, FCB-04, FCB-05): component split, locked representation, and `0000-00-00` as not locked. |
 | FC-13 | Are zero and negative truck fixed-cost amounts valid? | Finance/ERP | Yes | Open |
-| FC-14 | What reconciliation tolerance, if any, is acceptable? | Finance | Yes | Open |
+| FC-14 | What reconciliation tolerance, if any, is acceptable? | Finance | Yes | Open and now concrete: the 0.01 EUR implementation value is too tight to describe the data; a threshold at or above 1.00 EUR per task would classify every comparable row in the 2024-2025 sweep as reconciled. |
 | FC-15 | Does one task belong to exactly one truck fixed-cost calculation? | ERP/BA | Yes | Open |
-| FC-16 | Which task date field, if any, participates in fixed-cost reporting? | Finance/BA | Yes | Open |
+| FC-16 | Which task date field, if any, participates in fixed-cost reporting? | Finance/BA | Yes | Confirmed 2026-09-23 (FCB-06): the cost month is `kastai_data`. |
 
 ## 9. Reconciliation log
 
 | Date | Scope | Period | ERP reference | API/diagnostic result | Difference | Outcome |
 |---|---|---|---|---|---|---|
-| — | — | — | — | — | — | Not started |
+| 2026-09-23 | truck | 2025-03 (engineering probe) | None available | Bounded counters only; see section 15 | 2,185 of 4,894 tasks outside 0.01 | Not reconciled — additivity fails, no ERP reference |
+| 2026-09-23 | truck | 2025-07 (engineering probe) | None available | Bounded counters only; see section 15 | 2,343 of 4,921 tasks outside 0.01 | Not reconciled — additivity fails, no ERP reference |
+| 2026-09-23 | truck | 2024-01 to 2025-12, all 24 months (bounded prefix diagnostic) | None available | Bounded counters and magnitude buckets only; see section 16 | 0 of 116,678 comparable current rows above 1.00 EUR; 55,136 above 0.01 EUR | Not reconciled — no ERP reference; tolerance unapproved |
 
 ## 10. Query-plan evidence
 
@@ -275,6 +284,8 @@ Production monetary aggregation for a scope may be enabled only when all boxes b
 | 2026-09-22 | Slice 2 detail cardinality | `kastai_fiksuoti_vilkikai_det` | Task prefix; LIMIT 101 | PRIMARY / ref / Using index; derived scan bounded to 101 entries | Yes, internal diagnostic only |
 | 2026-09-22 | Slice 3A extended task/summary/master categories | `uzdaviniai`, `kastai_fiksuoti_ataskaita`, `masinos` | One parameter; at most 20 inputs | Unchanged: PRIMARY / const / one estimated row per base table; details in section 14 | Yes, internal diagnostic only |
 | 2026-09-22 | Slice 3A extended detail categories | `kastai_fiksuoti_vilkikai_det`, `kastai_fiksuoti_ataskaita` | Task prefix LIMIT 101 plus one summary PK row; two bound parameters | Detail PRIMARY / ref / Using index; summary PRIMARY / const; derived scan bounded to 101 entries | Yes, internal diagnostic only |
+| 2026-09-23 | Slice 4 month reconciliation | `kastai_fiksuoti_ataskaita`, `uzdaviniai`, `masinos`, `kastai_fiksuoti_vilkikai_det`, `kastai_fiksuoti_vilkikai_det_locked` | Two month bounds; `LIMIT 5001`; analytics gate and query timeout | Task/truck/detail all PRIMARY `eq_ref`/`ref` at one estimated row; derived summary set capped at 5,001 | Yes for an internal bounded diagnostic |
+| 2026-09-23 | Slice 4 month filter on the summary table | `kastai_fiksuoti_ataskaita` | `kastai_data` range | `type: index`, full PK walk of ~1,556,311 rows with `Using where`; no index exists on `kastai_data` | No for a public monetary endpoint |
 
 ## 11. Test record
 
@@ -297,6 +308,16 @@ Production monetary aggregation for a scope may be enabled only when all boxes b
 | 2026-09-22 | Uncommitted Slice 3A | `npm test` | Passed | 71 unit tests; the diagnostic file's nine tests cover the extended SQL allowlist, two-parameter detail binding, the new category allowlists, malformed/raw driver values failing closed, dropped extra fields and sanitized errors. Mutations removing the detail `LIMIT` or qualifying the new summary join were each caught. |
 | 2026-09-22 | Uncommitted Slice 3A | Targeted diagnostic integration, private 20-task sample | Passed | Aggregate category and pattern counts only, recorded in section 14. |
 | 2026-09-22 | Uncommitted Slice 3A | `npm run test:integration` | Passed | Seven live tests passed; diagnostic test skipped because its opt-in variable was absent. Only pass/fail lines were displayed. |
+| 2026-09-23 | Uncommitted Slice 4 over `8fba9ea` | `npm run typecheck` | Passed | No TypeScript errors. |
+| 2026-09-23 | Uncommitted Slice 4 | `npm test` | Passed | 84 unit tests, 0 failures; 13 are the new reconciliation file covering month validation, settlement bounds, static/unqualified SQL, current/locked separation, the 15-component sums, tolerance boundaries and ordering, every category value, the task bound, fail-closed aggregates, counter-only output, sanitized driver errors, analytics-gate concurrency and saturation, and unchanged public gating. |
+| 2026-09-23 | Uncommitted Slice 4 | Targeted reconciliation integration, 2025-03 and 2025-07 | Passed | Engineering probe months. EXPLAIN plus aggregate counters only; recorded in section 15. Both hit the 5,000-task bound. |
+| 2026-09-23 | Uncommitted Slice 4 | `npm run test:integration` | Passed | 7 live tests passed, 2 opt-in fixed-cost tests skipped because their variables were absent. Existing-suite business-data logs were suppressed from displayed output. |
+| 2026-09-23 | Uncommitted Slice 4 continued | `npm run typecheck` | Passed | No TypeScript errors. |
+| 2026-09-23 | Uncommitted Slice 4 continued | `npm test` | Passed | 98 unit tests, 0 failures; 27 in the reconciliation file, including boundary cases at 0.00/0.01/0.02/1.00/1.01/10.00/10.01/100.00/100.01, ABS on negative differences, zero-denominator nulls, sentinel exclusion, count-based aggregation and four mutation guards. |
+| 2026-09-23 | Uncommitted Slice 4 continued | Opt-in reconciliation, 24 months of 2024-2025 | Passed | Sequential; 288-387 ms per month; counters, buckets and aggregates only. Recorded in section 16. |
+| 2026-09-23 | Uncommitted Slice 4 continued | `npm run test:integration` | Passed with a known flake | Fixed-cost tests skipped by default as designed. The pre-existing `live invoices` test failed on 2 of 4 runs and passed on the others, reproducing the live row-count drift already recorded for Slice 1. It imports nothing from `src/fixed-costs/`. |
+| 2026-09-23 | Uncommitted Slice 4 continued | `git diff --check` | Passed | Scoped to the Slice 4 files. |
+| 2026-09-23 | Uncommitted Slice 4 | `git diff --check` | Passed | Scoped to the Slice 4 files. |
 
 ## 12. Change log
 
@@ -307,6 +328,8 @@ Production monetary aggregation for a scope may be enabled only when all boxes b
 | 2026-09-22 | Implemented Slice 2 internal truck diagnostic contract/repository, unit tests and opt-in integration test. Verified schema and indexed plans; recorded categorical bounded-sample evidence. Public endpoints and all disabled semantic capabilities unchanged. |
 | 2026-09-22 | Slice 2 review corrections: removed hardcoded `infot_2.` qualifiers from diagnostic SQL, added a regression test, reduced the documented `masinos` schema to the relevant subset, and clarified that Slice 1 was committed as `2b252b8` before Slice 2. |
 | 2026-09-22 | Slice 3A bounded live semantic investigation: reran corrected Slice 2 SQL live; added ten categorical diagnostics (sign classes, raw deleted flag, date states and relationships); recorded EXPLAIN, aggregate evidence and the approval-question list in section 14. Coding gate remains closed. |
+| 2026-09-23 | Slice 4: recorded ERP developer confirmations FCB-01 to FCB-12; captured the locked truck detail schema; added a bounded internal month-reconciliation capability with static SQL, a settlement bound, a documented 0.01 EUR tolerance and counter-only output; recorded EXPLAIN and two engineering-probe months. Measurement contradicts the expected component additivity, so the coding gate stays closed. |
+| 2026-09-23 | Slice 4 continued: added SQL magnitude buckets for absolute component differences with three documented denominators, corrected the truncation sentinel so counters never exceed the declared bound, added count-based quarterly/yearly aggregation, and swept all 24 months of 2024-2025. The magnitude evidence supersedes the earlier "additivity fails" reading: no comparable task differs by more than 1.00 EUR. Gate remains closed. |
 
 ## 13. Slice 2 — bounded truck relationship investigation
 
@@ -545,3 +568,220 @@ None of these has a recorded named approval in this repository. They map to FC-0
 ### Coding gate status
 
 The section 6 coding gate remains closed. No authoritative source, currency, reporting-date, deletion/lock, overlap or dimension rule is approved; no closed-period ERP reference or reconciliation exists; response metadata and classification version are unapproved. Production monetary aggregation remains disabled.
+
+## 15. Slice 4 — ERP-confirmed semantics and bounded closed-period reconciliation
+
+### ERP developer-confirmed business semantics (2026-09-23)
+
+These are business statements from the ERP developer, recorded as confirmed on 2026-09-23. They are a different evidence class from the schema facts in sections 3 and 13 and from the replica measurements below. Confirming meaning does not by itself reconcile any period or open the section 6 coding gate.
+
+| ID | Confirmed statement | Resolves |
+|---|---|---|
+| FCB-01 | `kastaivilkikai` is configuration/classifier input. | FC-01 scope; confirms the section 7 structural decision |
+| FCB-02 | `kastai_fiksuoti_ataskaita` contains the calculated task-level fixed-cost results. | FC-01 |
+| FCB-03 | `kastai_fiksuoti_vilkikai_det` contains the same truck result split into components. | FC-12 (component role) |
+| FCB-04 | The `_locked` tables contain the locked representation. | FC-12 (locked role) |
+| FCB-05 | `locked_kastaiVilkiko_data = '0000-00-00'` means the truck result is not locked. | FC-02, FC-12 (lock state) |
+| FCB-06 | `kastai_data` identifies the cost month. | FC-04, FC-16 |
+| FCB-07 | Currency is EUR. | FC-05 |
+| FCB-08 | The truck used for the logistics chain is `uzdaviniai.uzdavinio_masina`. | FC-08 |
+| FCB-09 | ERP displays current and locked values separately. | FC-02 (display behavior only) |
+| FCB-10 | Recent values can continue recalculating for approximately three months. | Period-settlement input |
+| FCB-11 | The detail components are **expected** to produce the task-level truck total, but this must still be verified against replica data. | FC-06, FC-07 — expectation only, not an approval |
+| FCB-12 | A settled 2025 month must be used for reconciliation. The exact month and the official ERP reference result are **not** supplied. | FC-11 partially; the selection remains open |
+
+FCB-09 confirms how ERP displays the two representations. It does not decide how the API must expose or select them; that remains a product/contract decision.
+
+FCB-11 is explicitly an expectation to be tested. The measurements below test it and it does not currently hold.
+
+### Confirmed schema facts for the locked truck detail (authenticated metadata, 2026-09-23)
+
+| Table | Approximate rows | Primary / unique keys | Other indexes |
+|---|---:|---|---|
+| `kastai_fiksuoti_vilkikai_det_locked` | 1,270,694 | `PRIMARY(uzdavinys, kastai_data)`; no other unique key | None |
+| `kastai_fiksuoti_vilkikai_det` (refreshed) | 1,480,410 | `PRIMARY(uzdavinys, kastai_data)`; no other unique key | None |
+| `kastai_fiksuoti_ataskaita` (refreshed estimate) | ~1,556,311 optimizer rows | `PRIMARY(uzdavinys)` | None |
+
+`kastai_fiksuoti_vilkikai_det_locked` returned `columns_complete`, `indexes_complete` and `foreign_keys_complete` as true, with no declared foreign keys. It carries the identical 17-column layout to the current truck detail: `uzdavinys int(11)`, `kastai_data date`, and the same 15 `decimal(13,2)` NOT NULL component columns:
+
+`amortizacija`, `remontas`, `padangos`, `draudimai`, `lizingas`, `vairuotojuDU`, `administracijaDU`, `kitiMokesciai`, `vairuotojoTelefonas`, `CMRdraudimas`, `papildomosIslaidos`, `vairuotojuDUPL`, `ruosimasGrazinimui`, `draudiminiuRemontuDedamoji`, `general_administrative_expenses`.
+
+Neither detail table has a date-leading index, and the summary table has no secondary index at all. Any month-scoped access therefore cannot be served by an index on the month column.
+
+### Implemented reconciliation capability
+
+`src/fixed-costs/reconciliation-repository.ts` adds one internal, bounded, read-only capability. It has no HTTP or CLI surface and accepts no caller-selected SQL.
+
+- Input is one month in strict `YYYY-MM-01` form. Anything else is rejected before a pool is touched.
+- A month is accepted only when it starts at least six months before the current month. This doubles the FCB-10 recalculation window as a conservative safety margin; it is an implementation bound, not an ERP close-of-period rule.
+- Exactly two bound parameters are used: the month start and the exclusive next-month start. Table names, columns, the row bound and the tolerance are module constants, so the statement text is static once the module loads.
+- Tables are unqualified; the configured `ERP_REPLICA_DATABASE` selects the schema.
+- The task prefix is bounded by `LIMIT 5001` — a 5,000-task bound plus one truncation sentinel — ordered by `uzdavinys`.
+- Execution runs through the shared `AnalyticsGate` and the configured replica query timeout.
+- Output is aggregate counters per allowlisted category, plus the requested month and the documented safety constants. No task ID, truck identifier, date or monetary amount is projected, returned or logged.
+
+Decimal differences are classified in SQL as `exact`, `within_tolerance`, `outside_tolerance` or `no_details`. The tolerance is **0.01 EUR**, recorded as an implementation safety value pending Finance approval under FC-14/FC-P04. Exact equality is tested before the tolerance, so `exact` never absorbs a difference. Current is compared only with current components and locked only with locked components; the two representations are never added or crossed.
+
+### EXPLAIN evidence (2026-09-23, production-shaped statement)
+
+| id | select_type | table | type | key | rows | Extra |
+|---:|---|---|---|---|---:|---|
+| 1 | PRIMARY | `<derived8>` | ALL | — | 5,001 | |
+| 1 | PRIMARY | `t` (`uzdaviniai`) | eq_ref | PRIMARY | 1 | |
+| 1 | PRIMARY | `m` (`masinos`) | eq_ref | PRIMARY | 1 | Using where; Using index |
+| 8 | DERIVED | `kastai_fiksuoti_ataskaita` | index | PRIMARY | 1,556,311 | Using where |
+| 7 | DEPENDENT SUBQUERY | `l` (locked detail) | ref | PRIMARY | 1 | |
+| 6 | DEPENDENT SUBQUERY | `l` (locked detail) | ref | PRIMARY | 1 | Using index |
+| 5 | DEPENDENT SUBQUERY | `d` (current detail) | ref | PRIMARY | 1 | |
+| 4 | DEPENDENT SUBQUERY | `d` (current detail) | ref | PRIMARY | 1 | Using index |
+
+Every task, truck and detail access is a primary-key `eq_ref` or `ref` lookup of one estimated row, and the derived task set is capped at 5,001 rows.
+
+The one unacceptable access is the derived summary scan: `type: index` over the whole `kastai_fiksuoti_ataskaita` primary key with `Using where`, because no index exists on `kastai_data`. `LIMIT` bounds the rows delivered but not the rows examined, so the month filter is evaluated while walking the PK in `uzdavinys` order. This plan is acceptable for an internal bounded diagnostic and is **not** acceptable for a public monetary endpoint. Section 6's "safe indexed query plan demonstrated" gate is therefore not satisfied for a month-filtered production shape.
+
+### Bounded measurements (2026-09-23)
+
+Two settled months were probed with the capability above. Both were selected by engineering as technical probes to exercise the tooling. **Neither is the Finance-approved reconciliation period**, and no official ERP reference result was available for comparison.
+
+Both runs hit the 5,000-task bound and returned `complete: false`, so each describes the first 5,001 summary rows of the month ordered by `uzdavinys`. That prefix is not a random sample and is not representative of the month.
+
+| Category | 2025-03 | 2025-07 |
+|---|---:|---:|
+| Tasks examined | 5,001 | 5,001 |
+| Summary rows whose `uzdaviniai` task is missing | 105 | 78 |
+| Assigned truck populated and resolved to a master row | 4,894 | 4,921 |
+| Assigned truck populated without a master row | 0 | 0 |
+| Assigned truck zero | 2 | 2 |
+| `deleted = 1` | 107 | 80 |
+| Lock date `0000-00-00` (unlocked per FCB-05) | 107 | 79 |
+| Lock date a valid calendar date | 4,894 | 4,922 |
+| Current detail rows per task: exactly one | 4,894 | 4,921 |
+| Current detail rows per task: more than one | 0 | 0 |
+| Locked detail rows per task: more than one | 0 | 0 |
+| Current total vs current component sum: exact | 2,599 | 2,482 |
+| Current total vs current component sum: within 0.01 | 110 | 96 |
+| Current total vs current component sum: outside 0.01 | 2,185 | 2,343 |
+| Locked total vs locked component sum: exact | 2,599 | 2,482 |
+| Locked total vs locked component sum: within 0.01 | 110 | 97 |
+| Locked total vs locked component sum: outside 0.01 | 2,185 | 2,343 |
+
+Observations, stated as measurements rather than conclusions:
+
+1. With exactly one detail row per task and all fifteen components summed, the component sum differs from the stored task-level total by more than 0.01 EUR for roughly 45 percent of tasks in 2025-03 and 48 percent in 2025-07. **The magnitude of those differences was not measured at this point, and the 0.01 EUR tolerance alone cannot distinguish a sub-euro rounding residual from a structural mismatch. The difference-bucket evidence below resolves that question and supersedes any conclusion drawn from this counter alone.**
+2. Duplicate grain was not observed. No task in either probe had more than one current or locked detail row, which is consistent with the `(uzdavinys, kastai_data)` primary key and one cost month per task.
+3. The truck mapping is structurally sound. Every populated `uzdavinio_masina` resolved to a `masinos` row in both months; no populated-without-master case occurred.
+4. Lock state and the `deleted` flag co-occur closely but not identically (2025-07: 80 deleted versus 79 unlocked). They are not the same condition.
+5. Current and locked comparisons are computed from separate tables and produced nearly, but not exactly, identical distributions (2025-07 differs by one task). The locked representation is therefore genuinely independent, not a copy of the current comparison.
+6. A minority of summary rows reference a task ID absent from `uzdaviniai` (105 and 78). No inclusion rule is assumed for them.
+
+Because the component set that composes the stored total is unknown, no subset was tried and none is proposed here. Selecting components until the totals matched would manufacture a business rule from data, which sections 2 and 6 prohibit.
+
+### Coding gate status after Slice 4
+
+The section 6 coding gate remains **closed**.
+
+Confirmed by FCB-01 to FCB-10: source roles, currency, cost-month meaning, lock-state meaning and the truck field. Still blocking:
+
+- summary/detail additivity holds only to within 1.00 EUR per task, and the rule that explains the sub-euro residual is unapproved (FC-06, FC-07);
+- no closed period has been reconciled against an official ERP reference, and neither the month nor the reference value is available (FC-11);
+- the reconciliation tolerance is an implementation value, not a Finance decision (FC-14);
+- the `deleted` inclusion rule is unapproved (FC-03);
+- zero/negative handling is unapproved (FC-13);
+- the month-filtered production plan requires a full primary-key walk of the summary table and is not an acceptable public query plan;
+- the API-level rule for selecting or exposing current versus locked is a contract decision that FCB-09 does not make.
+
+Production monetary aggregation stays disabled and all five allocation scopes remain behind `SEMANTICS_UNVERIFIED`.
+
+## 16. Slice 4 continued — difference distribution buckets
+
+### Bucket definition
+
+The reconciliation capability now classifies `ABS(stored_total - component_sum)` into six magnitude buckets, entirely in SQL `DECIMAL` arithmetic. No monetary value is converted to a JavaScript number at any stage; only the resulting integer counts leave the database.
+
+| Bucket | Boundary (EUR) |
+|---|---|
+| `exact` | `= 0.00` |
+| `rounding` | `> 0.00` and `<= 0.01` |
+| `small` | `> 0.01` and `<= 1.00` |
+| `moderate` | `> 1.00` and `<= 10.00` |
+| `material` | `> 10.00` and `<= 100.00` |
+| `large` | `> 100.00` |
+
+The ladder is generated from one shared constant consumed by both the SQL builder and an integer-cent verification classifier, so a boundary cannot change in one place only. Bucket names describe magnitude only and carry no Finance judgement about acceptability.
+
+Structurally non-comparable rows are separated **before** any monetary bucket is reachable and are counted on their own, so they cannot dilute a distribution: `no_details` (no detail row), `multiple_details` (more than one detail row, so no single usable grain), `missing_total` (null stored total) and `other`. Current is compared only with current detail and locked only with locked detail.
+
+Each bucket reports three denominators:
+
+- `percentageOfComparable` — of rows with exactly one usable detail row;
+- `percentageOfAllSampled` — of the bounded sample after the truncation sentinel is removed;
+- `relativeToExactPercentage` — of the exact-match count, where `exact` is by definition 100.
+
+A zero denominator returns `null`, never zero, `Infinity` or `NaN`. Percentages are derived from integer counts, half-up to two decimals.
+
+### Sentinel correction
+
+The statement still fetches `LIMIT 5001` — the hard query bound is unchanged — but the 5,001st row now serves only to prove truncation. A `ROW_NUMBER()` window gates every counter on `rowNumber <= 5000`, so no counter or percentage ever describes more than the declared bound. Metadata separates the three quantities explicitly: `taskLimit` (5,000), `sampledTaskCount` (rows actually counted), `fetchedTaskCount` (rows returned, including the sentinel) and `truncated`. A driver result whose sampled count disagrees with `MIN(fetched, limit)` fails closed.
+
+### Aggregation
+
+Monthly counts combine into quarter, year and combined totals by summing counts first and deriving every percentage afterwards from the combined totals. Monthly percentages are never averaged, so a small month cannot outweigh a large one. Aggregation is associative: combining months directly equals combining their quarters.
+
+### Bounded 2024-2025 diagnostic sweep (2026-09-23)
+
+All 24 months of 2024 and 2025 were run sequentially through the shared analytics gate.
+
+**These are bounded lowest-task-ID prefix diagnostics, not a complete financial reconciliation and not official ERP totals.** Every one of the 24 months holds more than 5,000 summary rows, so all 24 returned `truncated: true` and each figure describes only the first 5,000 tasks of that month ordered by `uzdavinys`. That prefix is not a random sample. Per-month query duration ranged from 288 ms to 387 ms.
+
+Combined current distribution, 24 months, 120,000 sampled tasks:
+
+| Bucket | Count | % of comparable | % of all sampled | Relative to exact |
+|---|---:|---:|---:|---:|
+| `exact` | 61,542 | 52.75 | 51.29 | 100 |
+| `rounding` | 4,583 | 3.93 | 3.82 | 7.45 |
+| `small` | 50,553 | 43.33 | 42.13 | 82.14 |
+| `moderate` | 0 | 0 | 0 | 0 |
+| `material` | 0 | 0 | 0 | 0 |
+| `large` | 0 | 0 | 0 | 0 |
+
+Non-comparable current rows: `no_details` 3,320; `multiple_details` 2; `missing_total` 0; `other` 0. Comparable rows: 116,678.
+
+Combined locked distribution is almost identical: `exact` 61,539 (52.74 percent of 116,693 comparable), `rounding` 4,605 (3.95), `small` 50,549 (43.32), and zero in every bucket above 1.00 EUR. Non-comparable locked rows: `no_details` 3,307; `multiple_details` 0.
+
+Yearly current distributions:
+
+| Year | Sampled | Comparable | `exact` | `rounding` | `small` | `moderate` | `material` | `large` | `exact` % of comparable |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2024 | 60,000 | 58,006 | 31,150 | 2,385 | 24,471 | 0 | 0 | 0 | 53.70 |
+| 2025 | 60,000 | 58,672 | 30,392 | 2,198 | 26,082 | 0 | 0 | 0 | 51.80 |
+
+Quarterly current distributions:
+
+| Quarter | Comparable | `exact` | `rounding` | `small` | `exact` % of comparable | `small` % of comparable |
+|---|---:|---:|---:|---:|---:|---:|
+| 2024-Q1 | 14,610 | 8,331 | 742 | 5,537 | 57.02 | 37.90 |
+| 2024-Q2 | 14,193 | 7,604 | 475 | 6,114 | 53.58 | 43.08 |
+| 2024-Q3 | 14,605 | 7,576 | 642 | 6,387 | 51.87 | 43.73 |
+| 2024-Q4 | 14,598 | 7,639 | 526 | 6,433 | 52.33 | 44.07 |
+| 2025-Q1 | 14,655 | 7,885 | 370 | 6,400 | 53.80 | 43.67 |
+| 2025-Q2 | 14,656 | 7,415 | 402 | 6,839 | 50.59 | 46.66 |
+| 2025-Q3 | 14,696 | 7,531 | 435 | 6,730 | 51.25 | 45.79 |
+| 2025-Q4 | 14,665 | 7,561 | 991 | 6,113 | 51.56 | 41.68 |
+
+`moderate`, `material` and `large` are zero in every quarter of both years.
+
+### What the distribution changes
+
+The magnitude evidence materially revises the Slice 4 reading recorded in section 15:
+
+1. **No comparable task in 24 months differs by more than 1.00 EUR.** Across 116,678 comparable current rows and 116,693 locked rows, the `moderate`, `material` and `large` buckets are empty. The earlier "roughly 45-48 percent outside tolerance" counter was accurate but described only whether a difference exceeded 0.01 EUR, not how large it was.
+2. Component additivity therefore holds at euro scale and fails only at sub-euro scale. 56.68 percent of comparable current rows agree within 0.01 EUR and 100 percent agree within 1.00 EUR.
+3. The residual is consistent with per-component rounding in the ERP calculation, since the stored total and the fifteen components are each `decimal(13,2)`. **This is a hypothesis, not a confirmed rule.** No rounding rule, direction or order of operations has been approved, and no component subset was tried.
+4. The pattern is stable across all 24 months, both years and both representations; it is not an artefact of one period.
+5. `multiple_details` is effectively absent: 2 current rows and 0 locked rows across 120,000 sampled tasks.
+
+This does not open the coding gate. It converts FC-06/FC-07 from "additivity may be structurally broken" into a narrower and more answerable question: which rounding rule reconciles the sub-euro residual, and what tolerance Finance will accept. Both remain unapproved, and the 0.01 EUR implementation tolerance is now known to be too tight to describe the data.
+
+### Coding gate status after the distribution sweep
+
+Unchanged: **closed**. Production monetary aggregation stays disabled and all five allocation scopes remain behind `SEMANTICS_UNVERIFIED`. The blockers listed in section 15 stand, with FC-06/FC-07 restated as above and FC-14 now carrying a concrete question: a tolerance at or above 1.00 EUR per task would classify every comparable row in this sweep as reconciled, and that threshold is Finance's to set, not engineering's.

@@ -89,27 +89,34 @@ Schema facts captured through the authenticated schema API, plus safety rules al
 - [x] No declared foreign keys and no explicit currency column exist in the inspected fixed-cost tables.
 - [x] The configured `infot_2` replica is reachable read-only, and fixed-cost schema metadata was captured from it on 2026-09-22.
 
-### 4.2 Unresolved semantics blocking monetary implementation
+### 4.2 ERP developer-confirmed business semantics (2026-09-23)
+
+Business meaning confirmed by the ERP developer and recorded as FCB-01 to FCB-12 in `docs/costs-endpoint.md` section 15. Confirmation of meaning is not reconciliation and does not open the activation gate in Section 9.
+
+- [x] `kastaivilkikai` is configuration/classifier input (FCB-01).
+- [x] `kastai_fiksuoti_ataskaita` contains the calculated task-level fixed-cost results (FCB-02).
+- [x] `kastai_fiksuoti_vilkikai_det` contains the same truck result split into components (FCB-03).
+- [x] The `_locked` tables contain the locked representation (FCB-04).
+- [x] `locked_kastaiVilkiko_data = '0000-00-00'` means the truck result is not locked (FCB-05).
+- [x] `kastai_data` identifies the cost month (FCB-06).
+- [x] Currency is EUR (FCB-07).
+- [x] The truck used for the logistics chain is `uzdaviniai.uzdavinio_masina` (FCB-08).
+- [x] ERP displays current and locked values separately (FCB-09). How the API exposes or selects them remains a contract decision.
+- [x] Recent values can continue recalculating for approximately three months (FCB-10).
+
+### 4.3 Unresolved semantics blocking monetary implementation
 
 No item below may be presented as fact in code, response metadata or documentation until it is approved and recorded in Section 12. Each maps to the canonical open-question register in `docs/costs-endpoint.md` section 8.
 
-- [!] Whether `kastai_fiksuoti_ataskaita` or `uzdaviniai` is authoritative for reportable truck fixed cost (FC-01).
-- [!] What `uzdaviniai.kastaiVilkiko`, `kastai_fiksuoti_ataskaita.kastaiVilkiko` and `locked_kastaiVilkiko` each represent (FC-12).
-- [!] Under what condition the current or the locked value must be selected (FC-02).
-- [!] Whether detail components are additive to the corresponding truck total, and which components are independently additive (FC-06, FC-07).
-- [!] Which date controls financial reporting, including whether `kastai_data` denotes an accounting month (FC-04, FC-16).
-- [!] What `locked_kastaiVilkiko_data` represents and whether `0000-00-00` denotes an unlocked calculation (FC-02, FC-12).
-- [!] Whether fixed-cost amounts are implicitly EUR, already converted, or carry currency through a verified join (FC-05).
-- [!] Whether truck reporting uses `uzdaviniai.uzdavinio_masina` or `uzd_vilk_vaziavo` (FC-08).
+- [!] Which rounding rule explains the sub-euro residual between the component sum and the stored task-level total (FC-06, FC-07). The 2024-2025 sweep measured every comparable task within 1.00 EUR and 56.68 percent within 0.01 EUR, so additivity holds at euro scale; the residual rule and the acceptable tolerance are unapproved.
+- [!] Which ERP report and which settled 2025 month are used for reconciliation, and the official reference result for that month (FC-11, FCB-12). Neither was supplied and neither may be invented.
+- [!] The Finance-approved reconciliation tolerance (FC-14). The implementation uses 0.01 EUR as a recorded safety value, now known to be too tight to describe the data; a threshold at or above 1.00 EUR per task would classify every comparable row in the sweep as reconciled.
 - [!] Whether `deleted = 0` defines reportable summary rows (FC-03).
 - [!] Whether zero and negative truck fixed-cost amounts are valid (FC-13).
 - [!] Whether one task belongs to exactly one truck fixed-cost calculation (FC-15).
-- [!] Which ERP report and closed period are used for reconciliation, and at what tolerance (FC-11, FC-14).
-- [!] How long recent values continue to change before a period may be treated as settled. No ERP statement of a stabilisation window is recorded in this repository, so no such window may be assumed when selecting the reconciliation period.
-
-The Slice 2/3A diagnostics join `uzdaviniai.uzdavinio_masina` to `masinos.id` to characterise coverage only. That is a diagnostic mapping, not an approved reporting mapping. `uzd_vilk_vaziavo` (`varchar(55)`) must not be equated with master `id` (`int(11)`).
-
-The bounded Slice 3A sample of 20 recent tasks produced a single co-occurrence pattern (zero task value, positive summary current value, zero locked value, zero locked date, `deleted = 0`, one detail row). It is not representative of any closed period and proves no rule.
+- [!] The API-level rule for selecting or exposing current versus locked values (FC-02). FCB-09 confirms ERP display behavior only.
+- [!] An acceptable indexed query plan for a month-filtered public endpoint. No index exists on `kastai_fiksuoti_ataskaita.kastai_data`, so the month filter currently requires a full primary-key walk.
+- [!] The inclusion rule for summary rows whose task is absent from `uzdaviniai`.
 
 ## 5. First-release contract decisions
 
@@ -131,30 +138,37 @@ The bounded Slice 3A sample of 20 recent tasks produced a single co-occurrence p
 
 Goal: prove the exact truck source, joins, amount relationships and query plans before enabling public monetary responses.
 
-- [ ] Select one settled 2025 calendar month with locked truck-cost data.
-- [ ] Record the selected month without recording sensitive task identifiers.
-- [ ] Add a bounded closed-period reconciliation repository operation.
-- [ ] Compare current task-level totals with locked task-level totals.
-- [ ] Compare current detail-component sums with current task-level totals.
-- [ ] Compare locked detail-component sums with locked task-level totals.
-- [ ] Count missing summary rows, missing detail rows and missing truck mappings.
-- [ ] Count unlocked rows and zero lock dates in the selected period.
-- [ ] Measure the `deleted` flag distribution without assuming its meaning.
-- [ ] Detect join multiplication before aggregation.
-- [ ] Return only aggregate counts, categorical outcomes and differences; do not expose raw rows or task IDs.
-- [ ] Run `EXPLAIN` for each intended production query shape.
-- [ ] Record indexes, access type, estimated rows and temporary/filesort use.
-- [ ] Reject any production query shape that requires an unbounded scan.
-- [ ] Compare the result with the corresponding official ERP report or ERP UI output.
-- [ ] Record Finance/ERP acceptance of the selected period and tolerance.
+- [!] Select one settled 2025 calendar month with locked truck-cost data. Blocked: FCB-12 withholds the month. Two engineering probe months (2025-03, 2025-07) exercised the tooling only.
+- [x] Record the probed months without recording sensitive task identifiers.
+- [x] Add a bounded closed-period reconciliation repository operation.
+- [x] Keep current and locked comparisons separate; neither is added to nor compared against the other representation.
+- [x] Compare current detail-component sums with current task-level totals.
+- [x] Compare locked detail-component sums with locked task-level totals.
+- [x] Count missing summary rows, missing detail rows and missing truck mappings.
+- [x] Count unlocked rows and zero lock dates in the selected period.
+- [x] Measure the `deleted` flag distribution without assuming its meaning.
+- [x] Detect join multiplication before aggregation.
+- [x] Return only aggregate counts, categorical outcomes and differences; do not expose raw rows or task IDs.
+- [x] Run `EXPLAIN` for each intended production query shape.
+- [x] Record indexes, access type, estimated rows and temporary/filesort use.
+- [x] Classify absolute differences into documented magnitude buckets in SQL decimal arithmetic.
+- [x] Report comparable, all-sampled and relative-to-exact denominators, with `null` for a zero denominator.
+- [x] Keep no-detail, multiple-detail and missing-total rows outside the monetary buckets and count them separately.
+- [x] Exclude the truncation sentinel from every counter while preserving the hard query bound.
+- [x] Distinguish `taskLimit`, `sampledTaskCount` and `fetchedTaskCount` in metadata.
+- [x] Aggregate quarters and years from counts, never from averaged monthly percentages.
+- [x] Sweep all 24 months of 2024-2025 sequentially and record bounded prefix diagnostics.
+- [x] Reject any production query shape that requires an unbounded scan. The month-filtered summary scan is recorded as unacceptable for a public endpoint.
+- [!] Compare the result with the corresponding official ERP report or ERP UI output. Blocked: no official reference result is available (FC-11, FCB-12).
+- [!] Record Finance/ERP acceptance of the selected period and tolerance. Blocked: FC-11 and FC-14 remain open.
 
 Acceptance criteria:
 
-- [ ] Summary/detail relationships reconcile within the approved tolerance.
-- [ ] Current/locked differences are zero or explicitly explained for the settled period.
-- [ ] Truck joins do not multiply monetary values.
-- [ ] Every intended production query has an acceptable bounded plan.
-- [ ] The reconciliation result and approver are recorded in Section 12.
+- [!] Summary/detail relationships reconcile within the approved tolerance. No approved tolerance exists. Against the 0.01 EUR implementation value, 43.33 percent of comparable rows fall outside it; against a 1.00 EUR threshold, none do.
+- [!] Current/locked differences are zero or explicitly explained for the settled period. Not established without an approved period and reference.
+- [x] Truck joins do not multiply monetary values. No task in either probe had more than one current or locked detail row, and every populated `uzdavinio_masina` resolved to exactly one master row.
+- [!] Every intended production query has an acceptable bounded plan. The internal diagnostic plan is acceptable; a month-filtered public shape is not, because `kastai_data` is unindexed.
+- [!] The reconciliation result and approver are recorded in Section 12. Measurements are recorded; no approver exists.
 
 Suggested commit:
 
@@ -164,12 +178,14 @@ Reconcile closed-period truck fixed costs
 
 ### Slice 5 — Monetary repository and runtime contract
 
+Entry condition: FC-P16 must be answered first. The 2024-2025 sweep shows the full 15-component sum reproduces the stored task-level total within 1.00 EUR for every comparable task, so the component path is viable in principle; what remains unapproved is the rounding rule behind the sub-euro residual and the tolerance Finance will accept.
+
 Goal: introduce the production repository boundary and explicit current/locked response semantics while keeping the public capability disabled.
 
 - [ ] Add a fixed-cost monetary repository interface.
 - [ ] Add a truck implementation using only static, parameterized, read-only SQL.
 - [ ] Use `kastai_fiksuoti_ataskaita` as the task-level summary source only after Slice 4 reconciliation passes.
-- [ ] Use current and locked truck detail tables only for their corresponding component representations.
+- [!] Use current and locked truck detail tables only for their corresponding component representations. Blocked by FC-P16: the component set composing the stored total is unknown, so no component-based measure can be built yet.
 - [ ] Join tasks through `uzdaviniai.id`, and trucks through the truck field approved under FC-08.
 - [ ] Apply the approved `deleted` rule.
 - [ ] Use the approved accounting-month/date filter without substituting lock date for accounting period.
@@ -421,8 +437,8 @@ Truck monetary capability may be enabled only when every item below is complete:
 
 | ID | Decision or evidence needed | Owner | Blocks | Status |
 |---|---|---|---|---|
-| FC-P01 | Exact settled 2025 reconciliation month (FC-11) | ERP / Finance | Monetary activation | Open |
-| FC-P02 | Official ERP report/UI result for the selected month (FC-11) | ERP / Finance | Monetary activation | Open |
+| FC-P01 | Exact settled 2025 reconciliation month (FC-11, FCB-12) | ERP / Finance | Monetary activation | Open; explicitly withheld, must not be invented |
+| FC-P02 | Official ERP report/UI result for the selected month (FC-11, FCB-12) | ERP / Finance | Monetary activation | Open; explicitly withheld, must not be invented |
 | FC-P03 | `deleted` inclusion rule (FC-03) | ERP / Finance | Production queries | Open |
 | FC-P04 | Decimal reconciliation tolerance (FC-14) | Finance | Monetary activation | Open |
 | FC-P05 | Zero and negative-value treatment (FC-13) | Finance | Monetary activation | Open |
@@ -431,12 +447,14 @@ Truck monetary capability may be enabled only when every item below is complete:
 | FC-P08 | Truck dimension projection and identifier exposure | BA / Security | Dimensions activation | Open |
 | FC-P09 | Cache backend and settled/recent TTLs | API owner / Operations | Cached release | Open |
 | FC-P10 | Cost classification availability/version behavior | Finance / BT Finance Analyst | Classified breakdown only | Deferred |
-| FC-P11 | Authoritative truck fixed-cost source and the meaning of each `kastaiVilkiko` field (FC-01, FC-12) | ERP / BA | Slice 4 and all monetary work | Open |
-| FC-P12 | Rule selecting the current or the locked representation (FC-02) | ERP / Finance | Public contract | Open |
-| FC-P13 | Reporting date basis, including whether `kastai_data` is the accounting month (FC-04, FC-16) | Finance / BA | Production queries | Open |
-| FC-P14 | Currency semantics: implicit EUR, converted, or joined (FC-05) | Finance / ERP | Response contract | Open |
-| FC-P15 | Truck field for reporting: `uzdavinio_masina` or `uzd_vilk_vaziavo` (FC-08) | ERP / BA | Truck grouping and filtering | Open |
-| FC-P16 | Summary/detail additivity and independently additive components (FC-06, FC-07) | ERP / Finance | Breakdown activation | Open |
+| FC-P11 | Authoritative truck fixed-cost source and the meaning of each `kastaiVilkiko` field (FC-01, FC-12) | ERP / BA | Slice 4 and all monetary work | Confirmed 2026-09-23 (FCB-01 to FCB-04) |
+| FC-P12 | API rule for exposing or selecting current versus locked (FC-02) | ERP / Finance / API owner | Public contract | Open; FCB-09 confirms ERP displays both separately |
+| FC-P13 | Reporting date basis, including whether `kastai_data` is the accounting month (FC-04, FC-16) | Finance / BA | Production queries | Confirmed 2026-09-23 (FCB-06) |
+| FC-P14 | Currency semantics: implicit EUR, converted, or joined (FC-05) | Finance / ERP | Response contract | Confirmed 2026-09-23 (FCB-07): EUR |
+| FC-P15 | Truck field for reporting: `uzdavinio_masina` or `uzd_vilk_vaziavo` (FC-08) | ERP / BA | Truck grouping and filtering | Confirmed 2026-09-23 (FCB-08) |
+| FC-P16 | Rounding rule behind the sub-euro residual between the component sum and the stored total (FC-06, FC-07) | ERP / Finance | Slice 5 and all monetary work | Open, narrowed: 0 of 116,678 comparable rows exceed 1.00 EUR; 43.33% exceed 0.01 EUR |
+| FC-P17 | Index or alternative access path for month-filtered production queries | ERP DBA / API owner | Public endpoint performance | Open: `kastai_fiksuoti_ataskaita.kastai_data` is unindexed |
+| FC-P18 | Inclusion rule for summary rows whose task is absent from `uzdaviniai` | ERP / Finance | Production queries | Open: 105 and 78 such rows in the two probes |
 
 ## 12. Evidence and completion log
 
@@ -445,19 +463,24 @@ Truck monetary capability may be enabled only when every item below is complete:
 | Date | ID | Decision | Evidence/approver | Commit/MR |
 |---|---|---|---|---|
 | 2026-09-23 | BASELINE | Dated implementation audit adopted as the plan baseline. | `docs/fixed-costs-status-2026-09-23.md` | — |
-| — | — | — | — | — |
+| 2026-09-23 | FCB-01..FCB-12 | ERP developer confirmed source roles, component split, locked representation, lock-state sentinel, cost month, EUR currency, truck field, separate display and the ~3-month recalculation window. | `docs/costs-endpoint.md` section 15 | — |
+| 2026-09-23 | SLICE-4 | Bounded internal month reconciliation added; settlement bound of six months and a 0.01 EUR tolerance recorded as implementation safety values pending Finance approval. | `src/fixed-costs/reconciliation-*.ts` | — |
+| 2026-09-23 | SLICE-4B | Magnitude buckets, sentinel correction and count-based quarterly/yearly aggregation added; 24-month sweep shows no comparable task above 1.00 EUR, superseding the earlier additivity reading. | `docs/costs-endpoint.md` section 16 | — |
 
 ### Reconciliation
 
 | Date | Scope | Period | Reference | Current result | Locked result | Detail result | Outcome | Commit/MR |
 |---|---|---|---|---|---|---|---|---|
-| — | truck | — | — | — | — | — | Not started | — |
+| 2026-09-23 | truck | 2025-03 probe | None available | Counters only | Counters only | 2,185/4,894 outside 0.01 | Not reconciled | — |
+| 2026-09-23 | truck | 2025-07 probe | None available | Counters only | Counters only | 2,343/4,921 outside 0.01 | Not reconciled | — |
+| 2026-09-23 | truck | 2024-01..2025-12 sweep | None available | Buckets only | Buckets only | 0/116,678 above 1.00 EUR | Not reconciled | — |
 
 ### Query plans
 
 | Date | Operation | Bounds | Index/access result | Estimated/scanned rows | Accepted | Commit/MR |
 |---|---|---|---|---|---|---|
-| — | — | — | — | — | No | — |
+| 2026-09-23 | Month reconciliation statement | 2 month bounds; `LIMIT 5001`; gate + timeout | Task/truck/detail PRIMARY `eq_ref`/`ref`, 1 row each | 5,001 derived | Yes, internal only | — |
+| 2026-09-23 | Month filter on summary table | `kastai_data` range | `type: index`, full PK walk, no usable index | ~1,556,311 | No for a public endpoint | — |
 
 ### Validation
 
@@ -465,6 +488,14 @@ Truck monetary capability may be enabled only when every item below is complete:
 |---|---|---|---|---|---|
 | 2026-09-23 | Baseline audit | `npm run typecheck` | Passed | No TypeScript errors | — |
 | 2026-09-23 | Baseline audit | `npm test` | Passed | 71 unit tests, 0 failures | — |
+| 2026-09-23 | Slice 4 | `npm run typecheck` | Passed | No TypeScript errors | — |
+| 2026-09-23 | Slice 4 | `npm test` | Passed | 84 unit tests, 0 failures (13 new) | — |
+| 2026-09-23 | Slice 4 | `npm run test:integration` | Passed | 7 live passed, 2 opt-in fixed-cost tests skipped | — |
+| 2026-09-23 | Slice 4 | Opt-in reconciliation, 2025-03 and 2025-07 | Passed | EXPLAIN and counters only; both hit the 5,000-task bound | — |
+| 2026-09-23 | Slice 4 | `git diff --check` | Passed | Scoped to Slice 4 files | — |
+| 2026-09-23 | Slice 4B | `npm test` | Passed | 98 unit tests, 0 failures (27 reconciliation, incl. 4 mutation guards) | — |
+| 2026-09-23 | Slice 4B | Opt-in sweep, 24 months | Passed | 288-387 ms per month; bounded prefix diagnostics | — |
+| 2026-09-23 | Slice 4B | `npm run test:integration` | Passed with known flake | Pre-existing `live invoices` row-count drift, unrelated to fixed costs | — |
 | 2026-09-23 | Baseline audit | `npm run test:integration` | Not run as a suite | `tests/integration/fixed-cost-diagnostics.test.ts` ran and skipped: opt-in `FIXED_COST_DIAGNOSTIC_TASK_IDS` absent. The remaining live tests were not run because they print ERP business rows. | — |
 | 2026-09-23 | Baseline audit | `git diff --check` | Passed | Checked for `docs/fixed-costs-status-2026-09-23.md` | — |
 
