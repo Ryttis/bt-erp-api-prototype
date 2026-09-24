@@ -2,15 +2,33 @@ import type { FastifyInstance } from 'fastify';
 import { ApiError, apiErrorBody, isQueryTimeout } from '../errors.js';
 import { safeDriverDiagnostics } from '../db/replica.js';
 import { logVehicleTelemetry } from '../telemetry.js';
-import { vehicleFields, defaultVehicleFields, numericRanges, dateRanges, idFilters, nameFilters, categoryFilters, isIsoDate, type VehicleFilters, type VehicleField, categorizeVehicles, vehicleCategoryFields, VehicleCategoryLimitError, categoryLimit, type VehicleCategoryField, type VehicleCategoryQuery, listVehicles, summarizeVehicles, vehicleMetrics, vehicleSortFields, type VehicleMetric, type VehicleQuery, type VehicleSummaryQuery } from './repository.js';
+import { vehicleFields, allVehicleFields, numericRanges, dateRanges, idFilters, nameFilters, categoryFilters, isIsoDate, type VehicleFilters, type VehicleField, categorizeVehicles, vehicleCategoryFields, VehicleCategoryLimitError, categoryLimit, type VehicleCategoryField, type VehicleCategoryQuery, listVehicles, summarizeVehicles, vehicleMetrics, vehicleSortFields, type VehicleMetric, type VehicleQuery, type VehicleSummaryQuery } from './repository.js';
 
 const parameters = new Set(['plate_number', 'plate_numbers', 'make', 'model', 'active', 'page', 'per_page', 'sort_by', 'sort_direction', 'view', 'metric', 'field', 'group_by', 'fields', ...idFilters, ...nameFilters, ...categoryFilters,
   ...Object.keys({ ...numericRanges, ...dateRanges }).flatMap((key) => [`${key}_from`, `${key}_to`])]);
 class InvalidVehicleQuery extends Error {}
 
+// Compatibility names used by the legacy ERP /plain/mcp/trucks endpoint. Each maps
+// to exactly one canonical filter; supplying both spellings is ambiguous and invalid.
+export const vehicleFilterAliases = {
+  status: 'ownership_status', owner: 'owner_name', consumer: 'consumer_name', lessor: 'lessor_name', bank: 'bank_name',
+} as const;
+
+function canonicalParameters(input: Record<string, unknown>): Record<string, unknown> {
+  const output = { ...input };
+  for (const [alias, canonical] of Object.entries(vehicleFilterAliases)) {
+    if (!Object.hasOwn(output, alias)) continue;
+    if (Object.hasOwn(output, canonical)) throw new InvalidVehicleQuery();
+    output[canonical] = output[alias];
+    delete output[alias];
+  }
+  return output;
+}
+
 type ParsedQuery = { view: 'rows'; query: VehicleQuery } | { view: 'summary'; query: VehicleSummaryQuery } | { view: 'distinct' | 'grouped'; query: VehicleCategoryQuery };
 
-function parseQuery(input: Record<string, unknown>): ParsedQuery {
+function parseQuery(query: Record<string, unknown>): ParsedQuery {
+  const input = canonicalParameters(query);
   // Only metric may repeat; all other duplicate or unknown parameters are invalid.
   for (const [key, value] of Object.entries(input)) {
     if (!parameters.has(key) || (typeof value !== 'string' && !(key === 'metric' && Array.isArray(value) && value.every((item) => typeof item === 'string')))) throw new InvalidVehicleQuery();
@@ -89,7 +107,7 @@ function parseQuery(input: Record<string, unknown>): ParsedQuery {
   let fields: VehicleField[] | undefined;
   if (input.fields !== undefined) {
     const requested = text('fields', 1000)!.split(',').map((key) => key.trim());
-    if (requested.length > defaultVehicleFields.length || requested.some((key) => !Object.hasOwn(vehicleFields, key))) throw new InvalidVehicleQuery();
+    if (requested.length > allVehicleFields.length || requested.some((key) => !Object.hasOwn(vehicleFields, key))) throw new InvalidVehicleQuery();
     fields = [...new Set(requested)] as VehicleField[];
   }
   if (view === 'distinct' || view === 'grouped') return { view, query: { ...filters, field: category as VehicleCategoryField, metrics } };

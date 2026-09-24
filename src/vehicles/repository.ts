@@ -24,6 +24,17 @@ const joins = {
   consumer: 'LEFT JOIN infot_2.klientai c ON c.id = NULLIF(r.naudotojas, 0)',
   lessor: 'LEFT JOIN infot_2.klientai lc ON lc.id = NULLIF(l.lizinguotojas, 0)',
   bank: 'LEFT JOIN infot_2.klientai bc ON bc.id = NULLIF(l.bankas, 0)',
+  ownership: `LEFT JOIN infot_2.masinu_priekabu_savininkas o ON o.id = (
+    SELECT ou.id FROM infot_2.masinu_priekabu_savininkas ou
+    WHERE ou.masinos_id = m.id ORDER BY ou.data_nuo DESC, ou.id DESC LIMIT 1)`,
+  owner: 'LEFT JOIN infot_2.klientai oc ON oc.id = NULLIF(o.savininkas, 0)',
+  ownershipStatus: 'LEFT JOIN infot_2.tipai_sarasai_visi ost ON ost.id = NULLIF(o.statusas, 0)',
+  // Validity types (galiojimu_tipai): 3 = 'Tech. apžiūra', 8 = 'Civilinis draudimas'.
+  // Latest expiry among records not marked obsolete (neaktualus).
+  inspection: `LEFT JOIN (SELECT gi.masinos_id, MAX(gi.galioja_iki) AS valid_until FROM infot_2.masinu_galiojimai gi
+    WHERE gi.ispejimo_id = 3 AND gi.neaktualus = 0 GROUP BY gi.masinos_id) ti ON ti.masinos_id = m.id`,
+  insurance: `LEFT JOIN (SELECT gc.masinos_id, MAX(gc.galioja_iki) AS valid_until FROM infot_2.masinu_galiojimai gc
+    WHERE gc.ispejimo_id = 8 AND gc.neaktualus = 0 GROUP BY gc.masinos_id) ci ON ci.masinos_id = m.id`,
 } as const;
 type Join = keyof typeof joins;
 type FieldKind = 'id' | 'text' | 'number' | 'fk' | 'date' | 'boolean';
@@ -53,9 +64,19 @@ export const vehicleFields = {
   consumer_name: field('c.firmos_pavadinimas', 'text', ['rental', 'consumer']),
   lessor_name: field('lc.firmos_pavadinimas', 'text', ['lease', 'lessor']),
   bank_name: field('bc.firmos_pavadinimas', 'text', ['lease', 'bank']),
+  inactive_since: field(validDateSql('CAST(m.nebedirba_nuo AS CHAR)'), 'date'),
+  owner_id: field('NULLIF(o.savininkas, 0)', 'fk', ['ownership']),
+  owner_name: field('oc.firmos_pavadinimas', 'text', ['ownership', 'owner']),
+  ownership_status: field('ost.pavadinimas', 'text', ['ownership', 'ownershipStatus']),
+  technical_inspection_valid_until: field(validDateSql('CAST(ti.valid_until AS CHAR)'), 'date', ['inspection']),
+  civil_insurance_valid_until: field(validDateSql('CAST(ci.valid_until AS CHAR)'), 'date', ['insurance']),
 } as const;
 export type VehicleField = keyof typeof vehicleFields;
-export const defaultVehicleFields = Object.keys(vehicleFields) as VehicleField[];
+export const allVehicleFields = Object.keys(vehicleFields) as VehicleField[];
+// Fields added for /plain/mcp/trucks parity are opt-in through `fields`, so the
+// default representation (and its SQL) stays exactly as before.
+export const optInVehicleFields: readonly VehicleField[] = ['inactive_since', 'owner_id', 'owner_name', 'ownership_status', 'technical_inspection_valid_until', 'civil_insurance_valid_until'];
+export const defaultVehicleFields = allVehicleFields.filter((key) => !optInVehicleFields.includes(key));
 export const vehicleSortFields = {
   plate_number: vehicleFields.plate_number.sql, make: vehicleFields.make.sql, model: vehicleFields.model.sql,
   manufactured_at: vehicleFields.manufactured_at.sql, registration_date: vehicleFields.registration_date.sql,
@@ -63,13 +84,17 @@ export const vehicleSortFields = {
   consumer_name: vehicleFields.consumer_name.sql, lessor_name: vehicleFields.lessor_name.sql, bank_name: vehicleFields.bank_name.sql,
   department: vehicleFields.department.sql, group: vehicleFields.group.sql, market: vehicleFields.market.sql,
   lease_start: vehicleFields.lease_start.sql, lease_end: vehicleFields.lease_end.sql,
+  inactive_since: vehicleFields.inactive_since.sql, owner_name: vehicleFields.owner_name.sql, ownership_status: vehicleFields.ownership_status.sql,
+  technical_inspection_valid_until: vehicleFields.technical_inspection_valid_until.sql,
+  civil_insurance_valid_until: vehicleFields.civil_insurance_valid_until.sql,
 } as const;
 
 export const numericRanges = { mileage: 'mileage', rent_price: 'rent_price', last_payment: 'last_payment_amount' } as const;
-export const dateRanges = { manufactured: 'manufactured_at', registration: 'registration_date', consumer: 'consumer_from', lease_start: 'lease_start', lease_end: 'lease_end' } as const;
-export const idFilters = ['consumer_id', 'lessor_id', 'bank_id'] as const;
-export const nameFilters = ['consumer_name', 'lessor_name', 'bank_name'] as const;
-export const categoryFilters = ['department', 'group', 'market'] as const;
+export const dateRanges = { manufactured: 'manufactured_at', registration: 'registration_date', consumer: 'consumer_from', lease_start: 'lease_start', lease_end: 'lease_end',
+  inactive_since: 'inactive_since', technical_inspection_valid_until: 'technical_inspection_valid_until', civil_insurance_valid_until: 'civil_insurance_valid_until' } as const;
+export const idFilters = ['consumer_id', 'lessor_id', 'bank_id', 'owner_id'] as const;
+export const nameFilters = ['consumer_name', 'lessor_name', 'bank_name', 'owner_name'] as const;
+export const categoryFilters = ['department', 'group', 'market', 'ownership_status'] as const;
 type NumericRangeKey = `${keyof typeof numericRanges}_${'from' | 'to'}`;
 type DateRangeKey = `${keyof typeof dateRanges}_${'from' | 'to'}`;
 export type VehicleFilters = {
@@ -86,6 +111,8 @@ export interface Vehicle {
   manufactured_at: string | null; registration_date: string | null; mileage: number | null;
   department: string | null; group: string | null; market: string | null;
   consumer_name: string | null; lessor_name: string | null; bank_name: string | null;
+  inactive_since: string | null; owner_id: number | null; owner_name: string | null; ownership_status: string | null;
+  technical_inspection_valid_until: string | null; civil_insurance_valid_until: string | null;
 }
 function numeric(value: unknown): number | null {
   if (value === null || value === undefined) return null;
@@ -158,7 +185,7 @@ function vehicleFilters(query: VehicleFilters) {
 export async function listVehicles(pool: ReplicaPool, query: VehicleQuery) {
   const { where, values, fields: filterFields } = vehicleFilters(query);
   const fields = [...new Set(query.fields ?? defaultVehicleFields)];
-  if (!fields.length || fields.length > defaultVehicleFields.length || fields.some((key) => !Object.hasOwn(vehicleFields, key))) throw new Error('Invalid vehicle projection');
+  if (!fields.length || fields.length > allVehicleFields.length || fields.some((key) => !Object.hasOwn(vehicleFields, key))) throw new Error('Invalid vehicle projection');
   const counts = await queryReadOnly<{ total: unknown }[]>(pool, `SELECT COUNT(*) AS total FROM infot_2.masinos m ${requiredJoins(filterFields)} ${where}`, values);
   const total = numeric(counts[0].total);
   if (total === null || !Number.isSafeInteger(total)) throw new Error('Invalid vehicle count');
@@ -242,10 +269,12 @@ export const vehicleCategoryFields = {
   department: `CAST(CONVERT(${vehicleFields.department.sql} USING utf8mb4) AS BINARY)`,
   group: `CAST(CONVERT(${vehicleFields.group.sql} USING utf8mb4) AS BINARY)`,
   market: `CAST(CONVERT(${vehicleFields.market.sql} USING utf8mb4) AS BINARY)`,
+  ownership_status: `CAST(CONVERT(${vehicleFields.ownership_status.sql} USING utf8mb4) AS BINARY)`,
   active: '(COALESCE(m.nebedirba, 0) = 0)',
   consumer_id: 'NULLIF(r.naudotojas, 0)',
   lessor_id: 'NULLIF(l.lizinguotojas, 0)',
   bank_id: 'NULLIF(l.bankas, 0)',
+  owner_id: vehicleFields.owner_id.sql,
 } as const;
 export type VehicleCategoryField = keyof typeof vehicleCategoryFields;
 export interface VehicleCategoryQuery extends VehicleFilters {
@@ -260,7 +289,7 @@ export class VehicleCategoryLimitError extends Error {
 function categoryValue(value: unknown, field: VehicleCategoryField): string | number | boolean | null {
   if (value === undefined) throw new Error('Incomplete vehicle category');
   if (value === null) return null;
-  if (field === 'make' || field === 'model' || field === 'department' || field === 'group' || field === 'market') return String(value);
+  if (field === 'make' || field === 'model' || field === 'department' || field === 'group' || field === 'market' || field === 'ownership_status') return String(value);
   if (field === 'active') {
     const active = numeric(value);
     if (active !== 0 && active !== 1) throw new Error('Invalid vehicle category');

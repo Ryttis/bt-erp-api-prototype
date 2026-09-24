@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { buildApp } from '../../src/app.js';
 import { loadConfig } from '../../src/config.js';
 import type { ReplicaPool } from '../../src/db/replica.js';
-import { listVehicles, summarizeVehicles, categorizeVehicles, vehicleSortFields, type VehicleQuery } from '../../src/vehicles/repository.js';
+import { allVehicleFields, listVehicles, summarizeVehicles, categorizeVehicles, vehicleSortFields, type VehicleQuery } from '../../src/vehicles/repository.js';
 const config = loadConfig({ ERP_REPLICA_HOST: 'example.invalid', ERP_REPLICA_DATABASE: 'infot_2', ERP_REPLICA_USER: 'test', ERP_REPLICA_PASSWORD: 'test', ERP_ANALYTICS_API_TOKEN: 'test-token-that-is-longer-than-thirty-two-characters' });
 const defaults: VehicleQuery = { page: 1, per_page: 50, sort_by: 'plate_number', sort_direction: 'asc' };
 function fixture(row: Record<string, unknown> = { id: 1, plate_number: 'TEST', mileage: 0, rent_price: 0 }) {
@@ -38,7 +38,7 @@ test('invalid projection/ranges/dates/IDs are rejected before any DB access', as
   const app = buildApp(config, () => pool, { authenticate: false });
   try {
     const invalid = ['fields=', 'fields=id,unknown', 'fields=id,,make', 'fields=__proto__', 'fields=rent_price%20AS%20x',
-      'fields=id&fields=make', `fields=${Array(25).fill('id').join(',')}`, 'mileage_from=-1',
+      'fields=id&fields=make', `fields=${Array(allVehicleFields.length + 1).fill('id').join(',')}`, 'mileage_from=-1',
       'mileage_from=NaN', 'rent_price_to=Infinity', 'rent_price_from=1e3', 'last_payment_from=abc',
       'rent_price_to=', 'mileage_from=10&mileage_to=9', 'rent_price_from=2&rent_price_to=1',
       'last_payment_from=2&last_payment_to=0', 'consumer_id=0', 'lessor_id=-1', 'bank_id=1.5',
