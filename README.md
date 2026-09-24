@@ -196,8 +196,9 @@ GET /vehicles?view=distinct&field=make
 GET /vehicles?view=grouped&group_by=make&metric=count&metric=sum:rent_price
 ```
 
-Both views allow exactly one category field: `make`, `model`, `active`,
-`consumer_id`, `lessor_id`, or `bank_id`. Distinct requires `field` and returns
+Both views allow exactly one category field: `make`, `model`, `department`,
+`group`, `market`, `active`, `consumer_id`, `lessor_id`, `bank_id`, `owner_id`,
+or `ownership_status`. Distinct requires `field` and returns
 `data: [{ value, count }]`, with `meta: { view: "distinct", field, complete: true }`.
 Grouped requires `group_by` and one or more repeated `metric` parameters, using
 the summary metric allowlist and maximum 10 occurrences. It returns
@@ -248,8 +249,9 @@ Projection is rows-only:
 GET /vehicles?fields=plate_number,make,model,mileage,rent_price
 ```
 
-`fields` accepts all 24 canonical response fields listed in the Vehicles sections,
-with at most 24 comma-separated entries. Whitespace is trimmed and duplicates
+`fields` accepts all 30 canonical response fields listed in the Vehicles sections
+(the 24 default fields plus the six opt-in fields below), with at most 30
+comma-separated entries. Whitespace is trimmed and duplicates
 are deduplicated. Unknown/empty fields or repeated `fields` parameters return
 400. Only requested properties are returned; ID is not implicitly added. Omit
 `fields` to return the full default representation. Analytical views reject it.
@@ -270,6 +272,12 @@ Additional filters, shared identically across all four views:
 | `consumer_id`, `lessor_id`, `bank_id` | Exact positive integer IDs |
 | `consumer_name`, `lessor_name`, `bank_name` | Case-insensitive literal substring |
 | `department`, `group`, `market` | Case-insensitive exact lookup name |
+| `inactive_since_from`, `inactive_since_to` | Inclusive bounds on the date the vehicle stopped working |
+| `technical_inspection_valid_until_from`, `technical_inspection_valid_until_to` | Inclusive technical-inspection expiry bounds |
+| `civil_insurance_valid_until_from`, `civil_insurance_valid_until_to` | Inclusive civil-insurance expiry bounds |
+| `owner_id` | Exact positive integer ID |
+| `owner_name` | Case-insensitive literal substring |
+| `ownership_status` | Case-insensitive exact status name (e.g. `Nuosava`, `Lizingas`) |
 
 `consumer_to` as a query bound does not change the row field `consumer_to`, which
 is the relation's end date. These filters never reinterpret latest as active today.
@@ -282,10 +290,37 @@ All supplied filters combine with AND.
 Rows can sort by `plate_number`, `make`, `model`, `manufactured_at`,
 `registration_date`, `mileage`, `rent_price`, `last_payment_amount`,
 `consumer_name`, `lessor_name`, `bank_name`, `department`, `group`, `market`,
-`lease_start`, or `lease_end`. Direction is `asc` or `desc`; nulls are always
+`lease_start`, `lease_end`, `inactive_since`, `owner_name`, `ownership_status`,
+`technical_inspection_valid_until`, or `civil_insurance_valid_until`. Direction is `asc` or `desc`; nulls are always
 last and ID ascending breaks ties. Analytical views retain their own ordering
 and reject row sorting/pagination. Page, plate-list, category, and metric limits
 remain 200, 100, 100, and 10 respectively.
+
+### Fields and filters migrated from `/plain/mcp/trucks`
+
+These opt-in row fields are returned only when named in `fields`, so the default
+representation is unchanged:
+
+| Field | Source |
+|---|---|
+| `inactive_since` | `masinos.nebedirba_nuo`; zero/invalid dates are null |
+| `owner_id`, `owner_name` | Latest ownership relation (`masinu_priekabu_savininkas`, `data_nuo DESC, id DESC`) → `klientai` |
+| `ownership_status` | That relation's `statusas` → `tipai_sarasai_visi.pavadinimas` |
+| `technical_inspection_valid_until` | Latest `masinu_galiojimai.galioja_iki` of type 3 (`Tech. apžiūra`), excluding obsolete (`neaktualus`) records |
+| `civil_insurance_valid_until` | Same, type 8 (`Civilinis draudimas`) |
+
+`ownership_status` and `owner_id` are also categorical fields for the `distinct`
+and `grouped` views; use `view=distinct&field=ownership_status` to list valid
+statuses. Ownership follows the same latest-known rule as consumer and lease
+relations and is never reinterpreted as "valid today".
+
+For compatibility, these legacy parameter names are accepted as exact synonyms:
+`status` → `ownership_status`, `owner` → `owner_name`, `consumer` →
+`consumer_name`, `lessor` → `lessor_name`, and `bank` → `bank_name`. Sending both
+spellings of one filter returns 400. Legacy date/range filters use the same names
+as their `/vehicles` counterparts. Known semantic differences from the legacy
+endpoint (row universe, `status`/`make`/lookup exact matching, strict validation)
+are listed in [vehicles-trucks-consolidation.md](docs/vehicles-trucks-consolidation.md).
 
 Mileage avg/min/max exclude nulls and include zero, without monetary rounding.
 Their sums are intentionally unsupported. Verified source mappings and bounded

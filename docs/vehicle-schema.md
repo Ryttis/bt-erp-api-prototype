@@ -15,6 +15,11 @@ changes were made. All tables below are in `infot_2`.
 | consumer_name | Latest user relation `naudotojas → klientai.id`, name `firmos_pavadinimas` |
 | lessor_name | Latest lease relation `lizinguotojas → klientai.id`, name `firmos_pavadinimas` |
 | bank_name | Latest lease relation `bankas → klientai.id`, name `firmos_pavadinimas` |
+| inactive_since | `masinos.nebedirba_nuo` (DATE); zero dates are null |
+| owner_id / owner_name | Latest ownership relation `masinu_priekabu_savininkas.savininkas → klientai.id`, name `firmos_pavadinimas` |
+| ownership_status | Latest ownership relation `statusas → tipai_sarasai_visi.id`, name `pavadinimas` |
+| technical_inspection_valid_until | `MAX(masinu_galiojimai.galioja_iki)` where `ispejimo_id = 3` and `neaktualus = 0` |
+| civil_insurance_valid_until | `MAX(masinu_galiojimai.galioja_iki)` where `ispejimo_id = 8` and `neaktualus = 0` |
 
 The status table also stores trailers. Its column comment explicitly identifies
 `ar_priekaba = 1` as trailer IDs. The unique index `(masinos_id, ar_priekaba)`
@@ -58,3 +63,28 @@ unique key and lookup primary keys, and `masinos_id_data_nuo_idx` for latest
 rental lookup. Temporary/filesort appeared for name sorting. No index change is
 recommended from this measurement. Integration timings vary with network and
 concurrent replica work.
+
+## Legacy trucks parity mappings (2026-09-24)
+
+Approved bounded read-only discovery. Lookup evidence: `galiojimu_tipai` id 3 is
+`Tech. apžiūra` and id 8 is `Civilinis draudimas` (both `kam = 'masinoms'`).
+Ownership statuses 1040 `Nuomota`, 1041 `Lizingas`, 1042 `Nuosava`, and 1528
+`Veiklos nuoma` belong to list `priekabu_statusai`. Vehicle ownership rows also use
+1102 `Panauda`, 1103 `Nuoma`, 1104 `Lizingas`, and 5454 `Nuosava` from list
+`priekabu_statusai_administracija`; the status join is by primary key and so
+covers both lists.
+
+The mappings were reconciled per vehicle ID against the dev ERP
+`/plain/mcp/trucks` output (3,590 rows, 3,445 with the same plate in both sources,
+which puts dev/replica drift at about 4% of plates). On plate-matching rows:
+`inactive_since` 95% equal, ownership status 92%, owner ID 89%,
+civil insurance 86%, and technical inspection 77%. Mismatches were
+almost all "legacy value older/absent", which is consistent with the dev snapshot being older.
+Alternatives were measured worse: "currently valid" relations matched about 43%
+and validity picks without the `neaktualus` filter about 40%. No vehicle has more than
+one active technical-inspection record. 56 vehicles have several active civil-insurance
+records, and the latest expiry is returned for them.
+
+Index use: `masinu_galiojimai` has single-column indexes on `masinos_id` and
+`ispejimo_id`, and `masinu_priekabu_savininkas` has `(masinos_id, data_nuo)`.
+Live full-fleet requests with all migrated fields, filters, and sorts completed in under 100 ms.
