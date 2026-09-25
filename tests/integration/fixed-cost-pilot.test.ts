@@ -117,6 +117,25 @@ test('opt-in live truck fixed-cost summary pilot', { skip: requested === undefin
     assert.ok(truckBody.data.totalTaskCount < data.totalTaskCount, 'A single truck is a strict subset of the fleet');
     assert.ok(truckBody.meta.complete === true && truckBody.meta.semanticsVersion === truckFixedCostPilotSemanticsVersion);
 
+    stage = 'single-truck breakdown';
+    const breakdownResponse = await app.inject({ url: `${url.replace('summary', 'breakdown')}&truckId=${truckId}`, headers });
+    const breakdownBody = breakdownResponse.json();
+    if (breakdownResponse.statusCode !== 200) {
+      console.log('Fixed-cost pilot single-truck breakdown', JSON.stringify({ status: breakdownResponse.statusCode, code: breakdownBody.error?.code }));
+    }
+    assert.equal(breakdownResponse.statusCode, 200, 'Single-truck breakdown succeeds');
+    assert.ok(breakdownBody.data.groups.length === 1 && breakdownBody.data.groups[0].truckId === truckId, 'Exactly the requested truck');
+    const [breakdownGroup] = breakdownBody.data.groups;
+    assert.ok(breakdownGroup.lockedAmount === truckBody.data.amount, 'Breakdown locked total equals the single-truck summary');
+    assert.ok(breakdownGroup.taskCount === truckBody.data.totalTaskCount, 'Breakdown task count equals the single-truck summary');
+    assert.ok(typeof breakdownGroup.currentAmount === 'string' || breakdownGroup.currentAmount === null, 'Current total is decimal text or null');
+    console.log('Fixed-cost pilot single-truck breakdown', JSON.stringify({
+      status: breakdownResponse.statusCode, taskCount: breakdownGroup.taskCount, lockStates: breakdownGroup.lockStates,
+      comparable: { current: breakdownGroup.reconciliation.current.comparableRecords, locked: breakdownGroup.reconciliation.locked.comparableRecords },
+    }));
+    const fleetBreakdown = await app.inject({ url: url.replace('summary', 'breakdown'), headers });
+    assert.equal(fleetBreakdown.statusCode, 422, 'Fleet-wide breakdown stays refused');
+
     stage = 'single-truck no data';
     const absentTruck = 2_000_000_000;
     assert.ok(Number((await direct(absentTruck)).records) === 0, 'The absent truck has no records');

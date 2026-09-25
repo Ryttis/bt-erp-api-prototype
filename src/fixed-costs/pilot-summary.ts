@@ -2,7 +2,8 @@ import type { AnalyticsGate } from '../analytics-gate.js';
 import type { ReplicaPool } from '../db/replica.js';
 import {
   assertDecimalString, fixedCostAuthoritativeSource, fixedCostMonetaryMaxRecords, InvalidFixedCostMonetaryResult,
-  type DecimalString, type FixedCostDeletedRowPolicy, type FixedCostMonetaryResult,
+  type DecimalString, type FixedCostDeletedRowPolicy, type FixedCostMonetaryGroup, type FixedCostMonetaryResult,
+  type FixedCostRepresentation,
 } from './monetary-contract.js';
 import { queryFixedCostMonetaryTotals } from './monetary-repository.js';
 import { parseFixedCostReconciliationMonth } from './reconciliation-contract.js';
@@ -134,8 +135,26 @@ const incomplete = () => new TruckFixedCostPilotRefused('INCOMPLETE_RESULT');
  * `runTruckFixedCostPilotSummary`, which supplies the fixed pilot inputs.
  */
 export function projectTruckFixedCostPilotSummary(result: FixedCostMonetaryResult, periodMonth: string, truckId?: number): TruckFixedCostPilotSummaryResponse {
+  const group = pilotIncludedGroup(result, 'locked', periodMonth, truckId);
+  // The stored locked total, copied as decimal text. No JavaScript arithmetic. A
+  // stored total of "0.00" over real, fully locked records is a legitimate zero.
+  return response(periodMonth, assertDecimalString(group.authoritativeTotal!, 'amount'), group.authoritativeRecords, group.lockedRecords, truckId);
+}
+
+/**
+ * The pilot population rules for one repository read, shared by the summary and the
+ * single-truck breakdown: the read must match the request, be complete, contain only
+ * declared row states, have included (deleted = 0) records with stored totals, and
+ * be fully locked. Returns the included group; refuses otherwise.
+ */
+export function pilotIncludedGroup(
+  result: FixedCostMonetaryResult,
+  representation: FixedCostRepresentation,
+  periodMonth: string,
+  truckId?: number,
+): FixedCostMonetaryGroup {
   const { meta } = result;
-  if (meta.representation !== 'locked' || meta.periodMonth !== periodMonth || meta.allocationScope !== 'truck'
+  if (meta.representation !== representation || meta.periodMonth !== periodMonth || meta.allocationScope !== 'truck'
     || meta.currency !== 'EUR' || meta.dateBasis !== 'kastai_data' || meta.authoritativeSource !== fixedCostAuthoritativeSource
     || meta.truckFilterApplied !== (truckId !== undefined)) {
     throw new InvalidFixedCostMonetaryResult('Repository result does not match the pilot read');
@@ -160,9 +179,7 @@ export function projectTruckFixedCostPilotSummary(result: FixedCostMonetaryResul
   if (group.lockedRecords !== group.authoritativeRecords || group.unlockedRecords !== 0 || group.unknownLockRecords !== 0) {
     throw new TruckFixedCostPilotRefused('PERIOD_NOT_FULLY_LOCKED');
   }
-  // The stored locked total, copied as decimal text. No JavaScript arithmetic. A
-  // stored total of "0.00" over real, fully locked records is a legitimate zero.
-  return response(periodMonth, assertDecimalString(group.authoritativeTotal, 'amount'), group.authoritativeRecords, group.lockedRecords, truckId);
+  return group;
 }
 
 function response(periodMonth: string, amount: DecimalString, totalTaskCount: number, lockedTaskCount: number, truckId?: number): TruckFixedCostPilotSummaryResponse {
