@@ -41,20 +41,32 @@ export const truckFixedCostPilotDeletedRowPolicy: FixedCostDeletedRowPolicy = Ob
   reference: 'FC-03',
 });
 
-export const truckFixedCostPilotLimitations = orderFixedCostLimitations([
+const sharedPilotLimitations = [
   'Provisional internal pilot result for BT Finance Analyst; it is not an officially reconciled Finance report.',
   'Not reconciled against an accepted official ERP report (FC-11); reconciliationStatus stays provisional_unreconciled_erp_reference.',
   'Rows with deleted = 1 are excluded under a temporary MP-8 pilot policy; the deleted-row rule is not permanently approved by Finance (FC-03).',
   'Supports exactly one settled complete calendar month that starts at least six months before the current month.',
   'The amount is the stored locked_kastaiVilkiko total from kastai_fiksuoti_ataskaita; it is never recomputed from component fields and no current value is reported.',
-  'Summary rows whose task is absent from uzdaviniai remain in the included population; their inclusion rule is unresolved (FC-P18).',
   'Zero and negative stored amounts are passed through unchanged; their treatment is unapproved (FC-13).',
   'Month filtering on kastai_data has no supporting index and scans the summary table; this is internal low-volume pilot behaviour and is not production-ready (FC-P17).',
+];
+
+export const truckFixedCostPilotLimitations = orderFixedCostLimitations([
+  ...sharedPilotLimitations,
+  'Summary rows whose task is absent from uzdaviniai remain in the included population; their inclusion rule is unresolved (FC-P18).',
+]);
+
+/** Single-truck responses: orphan rows cannot be attributed to a truck, so they are outside the population. */
+export const truckFixedCostPilotSingleTruckLimitations = orderFixedCostLimitations([
+  ...sharedPilotLimitations,
+  'The truck population is the summary rows whose task truck (uzdaviniai.uzdavinio_masina, FC-08) equals truckId; rows whose task is absent from uzdaviniai cannot be attributed to any truck and are excluded (FC-P18).',
 ]);
 
 export interface TruckFixedCostPilotSummaryResponse {
   data: {
     allocationScope: 'truck';
+    /** Present only on single-truck requests; fleet-wide responses omit it. */
+    truckId?: number;
     periodMonth: string;
     amount: DecimalString;
     currency: 'EUR';
@@ -121,11 +133,11 @@ const incomplete = () => new TruckFixedCostPilotRefused('INCOMPLETE_RESULT');
  * Exported for mutation tests; the route always reaches it through
  * `runTruckFixedCostPilotSummary`, which supplies the fixed pilot inputs.
  */
-export function projectTruckFixedCostPilotSummary(result: FixedCostMonetaryResult, periodMonth: string): TruckFixedCostPilotSummaryResponse {
+export function projectTruckFixedCostPilotSummary(result: FixedCostMonetaryResult, periodMonth: string, truckId?: number): TruckFixedCostPilotSummaryResponse {
   const { meta } = result;
   if (meta.representation !== 'locked' || meta.periodMonth !== periodMonth || meta.allocationScope !== 'truck'
     || meta.currency !== 'EUR' || meta.dateBasis !== 'kastai_data' || meta.authoritativeSource !== fixedCostAuthoritativeSource
-    || meta.truckFilterApplied !== false) {
+    || meta.truckFilterApplied !== (truckId !== undefined)) {
     throw new InvalidFixedCostMonetaryResult('Repository result does not match the pilot read');
   }
   if (meta.complete !== true || meta.truncated !== false) throw incomplete();
@@ -150,13 +162,14 @@ export function projectTruckFixedCostPilotSummary(result: FixedCostMonetaryResul
   }
   // The stored locked total, copied as decimal text. No JavaScript arithmetic. A
   // stored total of "0.00" over real, fully locked records is a legitimate zero.
-  return response(periodMonth, assertDecimalString(group.authoritativeTotal, 'amount'), group.authoritativeRecords, group.lockedRecords);
+  return response(periodMonth, assertDecimalString(group.authoritativeTotal, 'amount'), group.authoritativeRecords, group.lockedRecords, truckId);
 }
 
-function response(periodMonth: string, amount: DecimalString, totalTaskCount: number, lockedTaskCount: number): TruckFixedCostPilotSummaryResponse {
+function response(periodMonth: string, amount: DecimalString, totalTaskCount: number, lockedTaskCount: number, truckId?: number): TruckFixedCostPilotSummaryResponse {
   return {
     data: {
       allocationScope: 'truck',
+      ...(truckId === undefined ? {} : { truckId }),
       periodMonth,
       amount,
       currency: 'EUR',
@@ -172,7 +185,7 @@ function response(periodMonth: string, amount: DecimalString, totalTaskCount: nu
       reconciliationStatus: 'provisional_unreconciled_erp_reference',
       complete: true,
       pilot: true,
-      limitations: truckFixedCostPilotLimitations,
+      limitations: truckId === undefined ? truckFixedCostPilotLimitations : truckFixedCostPilotSingleTruckLimitations,
     },
   };
 }
@@ -191,8 +204,10 @@ export async function runTruckFixedCostPilotSummary(
 ): Promise<TruckFixedCostPilotSummaryResponse> {
   // Period rules run before any gate or replica access.
   const periodMonth = resolveTruckFixedCostPilotMonth(request, now);
+  // A single truck reuses the repository's bound truck allowlist (`t.uzdavinio_masina IN (?)`).
   const result = await queryFixedCostMonetaryTotals(pool, gate, {
     allocationScope: 'truck', representation: 'locked', periodMonth, limit: fixedCostMonetaryMaxRecords,
+    ...(request.truckId === undefined ? {} : { truckIds: [request.truckId] }),
   }, truckFixedCostPilotDeletedRowPolicy, now);
-  return projectTruckFixedCostPilotSummary(result, periodMonth);
+  return projectTruckFixedCostPilotSummary(result, periodMonth, request.truckId);
 }

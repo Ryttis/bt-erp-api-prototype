@@ -86,6 +86,57 @@ test('opt-in live truck fixed-cost summary pilot', { skip: requested === undefin
     assert.equal(otherScope.statusCode, 422, 'Other scopes stay disabled');
     assert.equal((await app.inject({ url: `${url}&representation=current`, headers })).statusCode, 400, 'Request cannot select a representation');
 
+    // Single truck: pick a truck with included records in the month (never printed) and
+    // reconcile the endpoint against an independent direct read of the same population.
+    stage = 'single-truck selection';
+    const [picked] = await queryReadOnly<{ truckId: unknown }[]>(app.replica, `SELECT t.uzdavinio_masina AS truckId
+      FROM kastai_fiksuoti_ataskaita a JOIN uzdaviniai t ON t.id = a.uzdavinys
+      WHERE a.kastai_data >= ? AND a.kastai_data < ? AND a.deleted = 0 AND t.uzdavinio_masina > 0
+      ORDER BY t.uzdavinio_masina LIMIT 1`, [query.periodMonth, query.periodEnd]);
+    assert.ok(picked, 'The settled month has an attributable truck');
+    const truckId = Number(picked.truckId);
+    const direct = async (id: number) => (await queryReadOnly<{ records: unknown; total: string | null }[]>(app.replica, `SELECT COUNT(*) AS records,
+      CAST(SUM(a.locked_kastaiVilkiko) AS CHAR) AS total
+      FROM kastai_fiksuoti_ataskaita a JOIN uzdaviniai t ON t.id = a.uzdavinys
+      WHERE a.kastai_data >= ? AND a.kastai_data < ? AND a.deleted = 0 AND t.uzdavinio_masina = ?`, [query.periodMonth, query.periodEnd, id]))[0];
+
+    stage = 'single-truck request';
+    const truckStarted = performance.now();
+    const truckResponse = await app.inject({ url: `${url}&truckId=${truckId}`, headers });
+    const truckDurationMs = Math.round(performance.now() - truckStarted);
+    const truckBody = truckResponse.json();
+    if (truckResponse.statusCode !== 200) {
+      console.log('Fixed-cost pilot single truck', JSON.stringify({ status: truckResponse.statusCode, code: truckBody.error?.code, durationMs: truckDurationMs }));
+    }
+    assert.equal(truckResponse.statusCode, 200, 'Single-truck settled month succeeds');
+    assert.deepEqual(Object.keys(truckBody.data), ['allocationScope', 'truckId', 'periodMonth', 'amount', 'currency', 'representation', 'totalTaskCount', 'lockedTaskCount']);
+    assert.ok(truckBody.data.truckId === truckId, 'The requested truck is echoed');
+    const expected = await direct(truckId);
+    assert.ok(truckBody.data.totalTaskCount === Number(expected.records), 'Task count matches the direct deleted = 0 read for the truck');
+    assert.ok(truckBody.data.amount === expected.total, 'Amount matches the direct stored locked sum for the truck');
+    assert.ok(truckBody.data.totalTaskCount < data.totalTaskCount, 'A single truck is a strict subset of the fleet');
+    assert.ok(truckBody.meta.complete === true && truckBody.meta.semanticsVersion === truckFixedCostPilotSemanticsVersion);
+
+    stage = 'single-truck no data';
+    const absentTruck = 2_000_000_000;
+    assert.ok(Number((await direct(absentTruck)).records) === 0, 'The absent truck has no records');
+    const absent = await app.inject({ url: `${url}&truckId=${absentTruck}`, headers });
+    assert.equal(absent.statusCode, 422, 'Absent truck is refused');
+    assert.equal(absent.json().error.code, 'NO_DATA_FOR_PERIOD', 'Absent truck is not reported as zero');
+    assert.equal((await app.inject({ url: `${url}&truckId=0`, headers })).statusCode, 400, 'Invalid truckId is rejected');
+
+    stage = 'single-truck EXPLAIN';
+    const truckQueryPlan = parseFixedCostMonetaryQuery({
+      allocationScope: 'truck', representation: 'locked', periodMonth: requested, limit: fixedCostMonetaryMaxRecords, truckIds: [truckId],
+    });
+    const truckPlan = (await queryReadOnly<Record<string, unknown>[]>(
+      app.replica, `EXPLAIN ${fixedCostMonetaryStatement(truckQueryPlan)}`, [query.periodMonth, query.periodEnd, truckId],
+    )).map(row => ({ id: planNumber(row.id), table: row.table, type: row.type, key: row.key, rows: planNumber(row.rows), extra: row.Extra }));
+    console.log('Fixed-cost pilot single truck', JSON.stringify({
+      status: truckResponse.statusCode, durationMs: truckDurationMs, totalTaskCount: truckBody.data.totalTaskCount, lockedTaskCount: truckBody.data.lockedTaskCount,
+    }));
+    console.log('Fixed-cost pilot single truck EXPLAIN', JSON.stringify(truckPlan));
+
     // EXPLAIN for the exact statement the pilot executes. Access metadata only.
     stage = 'EXPLAIN';
     const plan = await queryReadOnly<Record<string, unknown>[]>(

@@ -7,6 +7,8 @@ export interface FixedCostRequest {
   allocationScope: FixedCostAllocationScope;
   dateFrom?: string;
   dateTo?: string;
+  /** Canonical ERP truck ID (`uzdaviniai.uzdavinio_masina`); summary endpoint only. */
+  truckId?: number;
 }
 
 export interface FixedCostCurrencyScope {
@@ -52,11 +54,12 @@ const dateRangeDays = (from: string, to: string) => (Date.parse(`${to}T00:00:00Z
 
 /**
  * Fixed-cost monetary requests deliberately expose no pagination, grouping,
- * dimensions, sorting, filters, measures, or field selection yet. Their
- * mappings are financial semantics, not generic caller-selected columns.
+ * dimensions, sorting, measures, or field selection yet. Their mappings are
+ * financial semantics, not generic caller-selected columns. The only filter is an
+ * optional single `truckId`, admitted only where the caller allows it.
  */
-export function parseFixedCostRequest(input: Record<string, unknown>): FixedCostRequest {
-  const parameters = new Set(['allocationScope', 'dateFrom', 'dateTo']);
+export function parseFixedCostRequest(input: Record<string, unknown>, options: { allowTruckId?: boolean } = {}): FixedCostRequest {
+  const parameters = new Set(['allocationScope', 'dateFrom', 'dateTo', ...(options.allowTruckId === true ? ['truckId'] : [])]);
   for (const [key, value] of Object.entries(input)) {
     if (!parameters.has(key) || typeof value !== 'string') throw new InvalidFixedCostQuery();
   }
@@ -77,5 +80,17 @@ export function parseFixedCostRequest(input: Record<string, unknown>): FixedCost
     throw new InvalidFixedCostQuery();
   }
 
-  return { allocationScope: allocationScope as FixedCostAllocationScope, ...(dateFrom === undefined ? {} : { dateFrom, dateTo: dateTo! }) };
+  // Canonical decimal digits only: no sign, leading zero, whitespace, exponent or fraction.
+  let truckId: number | undefined;
+  if (input.truckId !== undefined) {
+    if (typeof input.truckId !== 'string' || !/^[1-9][0-9]*$/.test(input.truckId)) throw new InvalidFixedCostQuery();
+    truckId = Number(input.truckId);
+    if (!Number.isSafeInteger(truckId)) throw new InvalidFixedCostQuery();
+  }
+
+  return {
+    allocationScope: allocationScope as FixedCostAllocationScope,
+    ...(dateFrom === undefined ? {} : { dateFrom, dateTo: dateTo! }),
+    ...(truckId === undefined ? {} : { truckId }),
+  };
 }

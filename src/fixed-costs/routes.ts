@@ -41,7 +41,8 @@ export async function registerFixedCostRoutes(app: FastifyInstance, options: Fix
   for (const path of fixedCostEndpoints) {
     app.get<{ Querystring: Record<string, unknown> }>(`/expense-analytics/fixed-costs/${path}`, async (request, reply) => {
       try {
-        const parsed = parseFixedCostRequest(request.query);
+        // truckId is part of the summary contract only; elsewhere it stays an unknown parameter.
+        const parsed = parseFixedCostRequest(request.query, { allowTruckId: path === 'summary' });
         // The capability gate runs before any replica, repository, or analytics-gate
         // work. Only the configured truck summary pilot can resolve as enabled.
         const capability = resolveFixedCostCapability(path, parsed.allocationScope, fixedCosts);

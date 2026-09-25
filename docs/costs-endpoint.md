@@ -1164,6 +1164,12 @@ GET /expense-analytics/fixed-costs/summary?allocationScope=truck&dateFrom=2025-0
 Authorization: Bearer <service token>
 ```
 
+Optional single truck (2026-09-25): `truckId=<positive integer>` restricts the same locked read to one canonical ERP truck ID, the verified task-truck field `uzdaviniai.uzdavinio_masina` (FC-08 / FCB-08, joined to `masinos.id`). It reuses the repository's bound allowlist (`AND t.uzdavinio_masina IN (?)`) with every period, deleted-row, lock and completeness rule unchanged. Without `truckId` the fleet request, SQL and response are identical to before. With it, `data.truckId` is echoed after `allocationScope`. The FC-P18 limitation is replaced: summary rows whose task is absent from `uzdaviniai` cannot be attributed to a truck and fall outside a single-truck population. A truck with no included records in the month is 422 `NO_DATA_FOR_PERIOD`, never `0.00`. `truckId` must be canonical digits (`[1-9][0-9]*`, safe integer); plate numbers, lists and repetition are rejected. It is accepted on `summary` only; elsewhere it stays an unknown parameter (400). Telemetry records no truck identifier.
+
+```text
+GET /expense-analytics/fixed-costs/summary?allocationScope=truck&truckId=12345&dateFrom=2025-03-01&dateTo=2025-03-31
+```
+
 Rejected before any replica access:
 
 | Request class | Result |
