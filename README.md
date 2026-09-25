@@ -382,3 +382,34 @@ current Compose file binds the API to loopback only and supplies only PORT, so i
 needs a local environment override before the API can start. Keep its host port
 closed to public networks; expose it to the BT Finance Analyst through a local
 authenticated reverse proxy or a private firewall rule only.
+
+## Stage deployment (GitLab CI)
+
+Pipeline jobs: `test` and `typecheck` run on every branch and merge request;
+`deploy_stage` then `smoke_stage` run only on `master`. There is no production job.
+
+`deploy_stage` streams `scripts/deploy-stage.sh` over SSH to the stage host. It runs
+the manual procedure unchanged: in `/var/www/html/bt-erp-replica-api` it runs
+`git fetch`, `git switch master`, `git pull --ff-only`, then `docker compose` with
+`compose.yaml`, `~/.config/bt-erp-replica-api/compose.staging.yaml` and
+`--env-file ~/.config/bt-erp-replica-api/staging.env` (`up -d --build`, then `ps`).
+It fails if SSH, git, the build or startup fails, or if `bt-erp-replica-api-api-1`
+does not answer `/health` inside the container within 60 seconds.
+`smoke_stage` runs `scripts/smoke-stage.sh` on the stage host against the published
+API. It requires `GET /health` to return `{"status":"ok"}` and an unauthenticated
+`GET /vehicles` to return 401. It uses no token and never touches the replica.
+The manual commands above still work exactly as before.
+
+GitLab CI/CD variables (the same names bt-finance-analyst uses for this host):
+
+| Variable | Purpose |
+|---|---|
+| `STAGING_HOST` | Stage server address for SSH |
+| `STAGING_USER` | SSH user that owns the checkout and `~/.config/bt-erp-replica-api/` |
+| `STAGING_SSH_PRIVATE_KEY` | Masked; dedicated CI deploy private key, single-line base64 |
+| `STAGING_KNOWN_HOSTS` | Pinned SSH host-key line for the stage server (strict checking stays on) |
+| `STAGING_API_URL` | Optional; published API base URL for the smoke test (defaults to the stage address in `.gitlab-ci.yml`) |
+
+Scope the private key to protected branches/environments where possible. Never
+commit key material or put application secrets in CI variables; the application
+secrets stay in the stage host's `staging.env`.

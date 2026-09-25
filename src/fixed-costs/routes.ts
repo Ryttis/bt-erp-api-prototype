@@ -5,6 +5,8 @@ import { fixedCostEndpoints, resolveFixedCostCapability, type FixedCostEndpoint 
 import { InvalidFixedCostQuery, parseFixedCostRequest } from './contracts.js';
 import { FixedCostDeletedPolicyUnapproved, InvalidFixedCostMonetaryQuery, InvalidFixedCostMonetaryResult } from './monetary-contract.js';
 import { FixedCostMonetaryError, FixedCostMonetaryTruncated } from './monetary-repository.js';
+import { TruckFixedCostBreakdownUnavailable } from './breakdown-contract.js';
+import { runTruckFixedCostPilotBreakdown } from './pilot-breakdown.js';
 import { runTruckFixedCostPilotSummary, TruckFixedCostPilotRefused, type TruckFixedCostPilotRefusal } from './pilot-summary.js';
 import { parseTruckFixedCostSummaryRequest } from './summary-contract.js';
 
@@ -41,12 +43,13 @@ export async function registerFixedCostRoutes(app: FastifyInstance, options: Fix
   for (const path of fixedCostEndpoints) {
     app.get<{ Querystring: Record<string, unknown> }>(`/expense-analytics/fixed-costs/${path}`, async (request, reply) => {
       try {
-        const parsed = parseFixedCostRequest(request.query);
+        // truckId belongs to the summary and breakdown contracts; on dimensions it stays unknown.
+        const parsed = parseFixedCostRequest(request.query, { allowTruckId: path !== 'dimensions' });
         // The capability gate runs before any replica, repository, or analytics-gate
-        // work. Only the configured truck summary pilot can resolve as enabled.
-        const capability = resolveFixedCostCapability(path, parsed.allocationScope, fixedCosts);
+        // work. Only the configured truck pilots can resolve as enabled.
+        const capability = resolveFixedCostCapability(path, parsed.allocationScope, fixedCosts, { truckId: parsed.truckId });
         if (!capability.enabled) return reply.code(422).send(semanticsUnverified());
-        return await truckSummaryPilot(app, request, reply, path);
+        return await truckPilot(app, request, reply, capability.mode);
       } catch (error) {
         if (error instanceof InvalidFixedCostQuery) return reply.code(400).send(invalidQuery());
         throw error;
@@ -55,17 +58,25 @@ export async function registerFixedCostRoutes(app: FastifyInstance, options: Fix
   }
 }
 
-async function truckSummaryPilot(app: FastifyInstance, request: FastifyRequest<{ Querystring: Record<string, unknown> }>, reply: FastifyReply, path: FixedCostEndpoint) {
-  // Defence in depth: the resolver already restricts the pilot to the summary.
-  if (path !== 'summary') return reply.code(422).send(semanticsUnverified());
-  const summaryRequest = parseTruckFixedCostSummaryRequest(request.query);
+async function truckPilot(
+  app: FastifyInstance,
+  request: FastifyRequest<{ Querystring: Record<string, unknown> }>,
+  reply: FastifyReply,
+  mode: 'truck_summary_pilot' | 'truck_breakdown_pilot',
+) {
+  // Both pilots share one public request shape: allocationScope=truck, one month, optional truckId.
+  const pilotRequest = parseTruckFixedCostSummaryRequest(request.query);
+  const breakdown = mode === 'truck_breakdown_pilot';
+  // Defence in depth: the resolver already requires a truckId for the breakdown.
+  if (breakdown && pilotRequest.truckId === undefined) return reply.code(422).send(semanticsUnverified());
 
   const startedAt = performance.now();
-  const operation = 'fixed_cost.truck_summary_pilot';
+  const endpoint: FixedCostEndpoint = breakdown ? 'breakdown' : 'summary';
+  const operation = `fixed_cost.truck_${endpoint}_pilot`;
   // Duration, outcome and safe counters only: no amount, task, truck, date or row.
   const telemetry = (outcome: 'success' | 'refused' | 'error' | 'timeout' | 'busy', extra: Record<string, unknown> = {}) => {
     const event = {
-      request_id: request.id, endpoint: '/expense-analytics/fixed-costs/summary', operation,
+      request_id: request.id, endpoint: `/expense-analytics/fixed-costs/${endpoint}`, operation,
       duration_ms: Number((performance.now() - startedAt).toFixed(2)), outcome,
       timeout: outcome === 'timeout', busy: outcome === 'busy', ...extra,
     };
@@ -74,7 +85,12 @@ async function truckSummaryPilot(app: FastifyInstance, request: FastifyRequest<{
   };
 
   try {
-    const result = await runTruckFixedCostPilotSummary(app.replica, app.analyticsGate, summaryRequest);
+    if (breakdown) {
+      const result = await runTruckFixedCostPilotBreakdown(app.replica, app.analyticsGate, { ...pilotRequest, truckId: pilotRequest.truckId! });
+      telemetry('success', { group_count: result.meta.pagination.groupCount });
+      return result;
+    }
+    const result = await runTruckFixedCostPilotSummary(app.replica, app.analyticsGate, pilotRequest);
     telemetry('success', { total_task_count: result.data.totalTaskCount });
     return result;
   } catch (error) {
@@ -82,7 +98,7 @@ async function truckSummaryPilot(app: FastifyInstance, request: FastifyRequest<{
       telemetry('refused', { refusal: error.code });
       return reply.code(422).send(apiErrorBody(new ApiError(422, error.code, pilotRefusalMessages[error.code])));
     }
-    if (error instanceof FixedCostMonetaryTruncated || error instanceof InvalidFixedCostMonetaryResult) {
+    if (error instanceof FixedCostMonetaryTruncated || error instanceof InvalidFixedCostMonetaryResult || error instanceof TruckFixedCostBreakdownUnavailable) {
       telemetry('refused', { refusal: 'INCOMPLETE_RESULT' });
       return reply.code(422).send(apiErrorBody(new ApiError(422, 'INCOMPLETE_RESULT', pilotRefusalMessages.INCOMPLETE_RESULT)));
     }

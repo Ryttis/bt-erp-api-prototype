@@ -1164,6 +1164,14 @@ GET /expense-analytics/fixed-costs/summary?allocationScope=truck&dateFrom=2025-0
 Authorization: Bearer <service token>
 ```
 
+Optional single truck (2026-09-25): `truckId=<positive integer>` restricts the same locked read to one canonical ERP truck ID, the verified task-truck field `uzdaviniai.uzdavinio_masina` (FC-08 / FCB-08, joined to `masinos.id`). It reuses the repository's bound allowlist (`AND t.uzdavinio_masina IN (?)`) with every period, deleted-row, lock and completeness rule unchanged. Without `truckId` the fleet request, SQL and response are identical to before. With it, `data.truckId` is echoed after `allocationScope`. The FC-P18 limitation is replaced: summary rows whose task is absent from `uzdaviniai` cannot be attributed to a truck and fall outside a single-truck population. A truck with no included records in the month is 422 `NO_DATA_FOR_PERIOD`, never `0.00`. `truckId` must be canonical digits (`[1-9][0-9]*`, safe integer); plate numbers, lists and repetition are rejected. It is accepted on `summary` only; elsewhere it stays an unknown parameter (400). Telemetry records no truck identifier.
+
+```text
+GET /expense-analytics/fixed-costs/summary?allocationScope=truck&truckId=12345&dateFrom=2025-03-01&dateTo=2025-03-31
+```
+
+Single-truck breakdown pilot (2026-09-25): `GET /expense-analytics/fixed-costs/breakdown` with the same four parameters (`truckId` required) resolves as enabled under the same pilot flag; without `truckId` breakdown stays 422 `SEMANTICS_UNVERIFIED`, and the Slice 7A breakdown parameters (`groupBy`, `truckIds`, pagination, sorting) stay 400. It runs the unchanged Slice 7A orchestration (`groupBy=truck`, one group) over two reads of the existing monetary repository, current then locked, each bound to `t.uzdavinio_masina IN (?)`, and applies the summary pilot's period, deleted-row, lock and completeness refusals to both. The response is the unchanged Slice 7A contract: `currentAmount` and `lockedAmount` are the stored totals, and reconciliation carries only aggregate component evidence. Component totals are never forced to equal the stored totals, and no per-component amount is exposed (FC-06/FC-07). **Pilot decision:** unlike the summary pilot, this path reads and reports the current representation, which ERP may still recalculate. Live validation (2025-03, one truck) matched the breakdown's locked total and task count to the single-truck summary. With the truck filter, `EXPLAIN` drives from the `uzdaviniai.uzdavinio_masina` index (about 1,730 tasks for the sampled truck) with primary-key lookups into `kastai_fiksuoti_ataskaita`, so a single-truck read avoids the FC-P17 month scan.
+
 Rejected before any replica access:
 
 | Request class | Result |
@@ -1173,7 +1181,7 @@ Rejected before any replica access:
 | Missing date pair, malformed, impossible or reversed dates | 400 `INVALID_QUERY` |
 | Partial month or multi-month range | 422 `PERIOD_NOT_COMPLETE_MONTH` |
 | Month starting less than six months before the current month | 422 `PERIOD_NOT_SETTLED` |
-| Non-truck scope, breakdown, dimensions, or the flag off | 422 `SEMANTICS_UNVERIFIED` |
+| Non-truck scope, fleet-wide breakdown (no `truckId`), dimensions, or the flag off | 422 `SEMANTICS_UNVERIFIED` |
 
 ### Response contract
 

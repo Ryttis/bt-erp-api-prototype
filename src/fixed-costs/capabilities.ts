@@ -27,23 +27,25 @@ export type FixedCostEndpoint = typeof fixedCostEndpoints[number];
 
 export type FixedCostResolvedCapability =
   | { enabled: false }
-  | { enabled: true; mode: 'truck_summary_pilot' };
+  | { enabled: true; mode: 'truck_summary_pilot' | 'truck_breakdown_pilot' };
 
 /**
  * Deterministic capability resolution from validated application configuration.
  *
- * Exactly one combination can resolve as enabled: the truck summary, and only when
- * the fail-closed Slice 6P pilot flag is strictly `true`. Breakdown, dimensions and
- * every other scope stay disabled whatever the flag says. Request, model or query
- * input never reaches this function; only `AppConfig` does.
+ * Only two combinations can resolve as enabled, and only when the fail-closed pilot
+ * flag is strictly `true`: the truck summary, and the truck breakdown for exactly one
+ * validated `truckId`. Fleet-wide breakdown, dimensions and every other scope stay
+ * disabled whatever the flag says. Beyond the parsed truck selector, request, model
+ * or query input never reaches this function.
  */
 export function resolveFixedCostCapability(
   endpoint: FixedCostEndpoint,
   scope: FixedCostAllocationScope,
   config: AppConfig['fixedCosts'],
+  selection: { truckId?: number } = {},
 ): FixedCostResolvedCapability {
-  if (endpoint === 'summary' && scope === 'truck' && config.truckSummaryPilotEnabled === true) {
-    return { enabled: true, mode: 'truck_summary_pilot' };
-  }
+  if (scope !== 'truck' || config.truckSummaryPilotEnabled !== true) return { enabled: false };
+  if (endpoint === 'summary') return { enabled: true, mode: 'truck_summary_pilot' };
+  if (endpoint === 'breakdown' && selection.truckId !== undefined) return { enabled: true, mode: 'truck_breakdown_pilot' };
   return { enabled: false };
 }

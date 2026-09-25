@@ -2,13 +2,64 @@ image: node:22-alpine
 
 stages:
   - test
+  - deploy
+  - smoke
 
-test:
+.checks:
   stage: test
-  script:
+  before_script:
     - npm ci
-    - npm run typecheck
-    - npm test
   rules:
     - if: $CI_COMMIT_BRANCH
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+test:
+  extends: .checks
+  script:
+    - npm test
+
+typecheck:
+  extends: .checks
+  script:
+    - npm run typecheck
+
+# Stage deployment over SSH, using the same variable conventions as bt-finance-analyst.
+# The private key is base64 in a masked variable; the host key is pinned.
+.stage_ssh:
+  image: alpine:3.22
+  variables:
+    STAGING_API_URL: http://10.10.11.29:3000
+  rules:
+    - if: $CI_COMMIT_BRANCH == "master"
+  before_script:
+    - apk add --no-cache openssh-client
+    - test -n "${STAGING_HOST:-}"
+    - test -n "${STAGING_USER:-}"
+    - test -n "${STAGING_KNOWN_HOSTS:-}"
+    - test -n "${STAGING_SSH_PRIVATE_KEY:-}"
+    - install -d -m 700 "$HOME/.ssh"
+    - printf '%s' "$STAGING_SSH_PRIVATE_KEY" | base64 -d > "$HOME/.ssh/id_ed25519"
+    - chmod 600 "$HOME/.ssh/id_ed25519"
+    - ssh-keygen -y -f "$HOME/.ssh/id_ed25519" >/dev/null
+    - printf '%s\n' "$STAGING_KNOWN_HOSTS" | tr -d '\r' > "$HOME/.ssh/known_hosts"
+    - chmod 600 "$HOME/.ssh/known_hosts"
+    - >-
+      SSH="ssh -i $HOME/.ssh/id_ed25519 -o IdentitiesOnly=yes -o BatchMode=yes
+      -o StrictHostKeyChecking=yes -o ConnectTimeout=15 ${STAGING_USER}@${STAGING_HOST}"
+
+deploy_stage:
+  extends: .stage_ssh
+  stage: deploy
+  needs: [test, typecheck]
+  resource_group: staging
+  environment:
+    name: staging
+  script:
+    - $SSH 'bash -s' < scripts/deploy-stage.sh
+
+smoke_stage:
+  extends: .stage_ssh
+  stage: smoke
+  needs: [deploy_stage]
+  script:
+    - $SSH "bash -s -- '${STAGING_API_URL}'" < scripts/smoke-stage.sh

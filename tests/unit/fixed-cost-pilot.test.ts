@@ -14,10 +14,11 @@ import {
   fixedCostMonetaryPendingApprovals, InvalidFixedCostMonetaryResult,
   type FixedCostMonetaryGroup, type FixedCostMonetaryResult,
 } from '../../src/fixed-costs/monetary-contract.js';
-import { queryFixedCostMonetaryTotals } from '../../src/fixed-costs/monetary-repository.js';
+import { fixedCostComponentFields, queryFixedCostMonetaryTotals } from '../../src/fixed-costs/monetary-repository.js';
 import {
   projectTruckFixedCostPilotSummary, resolveTruckFixedCostPilotMonth, runTruckFixedCostPilotSummary,
   truckFixedCostPilotDeletedRowPolicy, truckFixedCostPilotLimitations, truckFixedCostPilotSemanticsVersion,
+  truckFixedCostPilotSingleTruckLimitations,
   TruckFixedCostPilotRefused, type TruckFixedCostPilotSummaryResponse,
 } from '../../src/fixed-costs/pilot-summary.js';
 import { fixedCostDifferenceBuckets } from '../../src/fixed-costs/reconciliation-contract.js';
@@ -763,4 +764,387 @@ test('mutation: dropping provisional limitations fails the metadata guard', () =
     assert.throws(() => guard(dropped), assert.AssertionError, String(pattern));
   }
   assert.throws(() => guard({ ...projected, meta: { ...projected.meta, semanticsVersion: null as unknown as 'truck-fixed-cost-summary-pilot-v1' } }), assert.AssertionError);
+});
+
+// --- single-truck summary (truckId) --------------------------------------------
+
+const truckQuery = `${validQuery}&truckId=12345`;
+const truckFilterSql = 'AND t.uzdavinio_masina IN (?)';
+
+test('truckId absent: the fleet-wide read, SQL and response are unchanged', async () => {
+  await withApp(() => [driverRow()], async (app, calls) => {
+    const response = await app.inject(summaryUrl(validQuery));
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(response.json(), expectedSuccess);
+    assert.equal(Object.hasOwn(response.json().data, 'truckId'), false);
+    assert.deepEqual(calls[0].values, ['2025-03-01', '2025-04-01']);
+    assert.doesNotMatch(calls[0].sql, /uzdavinio_masina/);
+  });
+});
+
+test('truckId: one bound placeholder on the verified task-truck column filters the same read', async () => {
+  let fleetSql = '';
+  await withApp(() => [driverRow()], async (_app, calls) => {
+    await _app.inject(summaryUrl(validQuery));
+    fleetSql = calls[0].sql;
+  });
+  await withApp(() => [driverRow()], async (app, calls) => {
+    const truckId = 987654321;
+    const response = await app.inject(summaryUrl(`${validQuery}&truckId=${truckId}`));
+    assert.equal(response.statusCode, 200);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0].values, ['2025-03-01', '2025-04-01', truckId], 'truckId is a bound number');
+    assert.equal(calls[0].sql.split(truckFilterSql).length, 2, 'Exactly one truck predicate');
+    assert.ok(!calls[0].sql.includes(String(truckId)), 'truckId is never interpolated');
+    // Identical statement apart from the one bound predicate: same locked source, deleted grouping and bound.
+    assert.equal(calls[0].sql.replace(`\n        ${truckFilterSql}`, ''), fleetSql);
+  });
+});
+
+test('invalid truckId variants and plate numbers fail with 400 before replica access', async () => {
+  for (const config of [enabledConfig, disabledConfig]) {
+    await withApp(() => [driverRow()], async (app, calls) => {
+      for (const value of ['', '0', '00', '-1', '+5', '05', '1.5', '1.0', '1e3', '0x10', 'abc', '%205', '5%20', '9007199254740992',
+        '1%20OR%201=1', "1'%20OR%20'1'='1", '1;DROP%20TABLE%20uzdaviniai', '1)--', 'HOO756', 'null', 'true']) {
+        const response = await app.inject(summaryUrl(`${validQuery}&truckId=${value}`));
+        assert.equal(response.statusCode, 400, value);
+        assert.deepEqual(response.json(), { error: { code: 'INVALID_QUERY', message: 'Invalid fixed-cost query' } }, value);
+      }
+      for (const extra of ['truckId=1&truckId=2', 'truckId=1&truckId=1', 'truckIds=1', 'truckId[]=1', 'plateNumber=HOO756', 'plate_number=HOO756', 'truck=1', 'truckId=1,2']) {
+        assert.equal((await app.inject(summaryUrl(`${validQuery}&${extra}`))).statusCode, 400, extra);
+      }
+      assert.equal(calls.length, 0);
+    }, config);
+  }
+});
+
+test('truckId stays unknown on dimensions and unlocks nothing without the flag or outside truck scope', async () => {
+  await withApp(() => [driverRow()], async (app, calls) => {
+    assert.equal((await app.inject(`/expense-analytics/fixed-costs/dimensions?${truckQuery}`)).statusCode, 400, 'dimensions');
+    const otherScope = await app.inject(summaryUrl('allocationScope=trailer&dateFrom=2025-03-01&dateTo=2025-03-31&truckId=1'));
+    assert.equal(otherScope.statusCode, 422);
+    assert.equal(otherScope.json().error.code, 'SEMANTICS_UNVERIFIED');
+    assert.equal(calls.length, 0);
+  });
+  await withApp(() => [driverRow()], async (app, calls) => {
+    for (const endpoint of ['summary', 'breakdown']) {
+      const response = await app.inject(`/expense-analytics/fixed-costs/${endpoint}?${truckQuery}`);
+      assert.equal(response.statusCode, 422, `Flag off still refuses a valid truck ${endpoint} request`);
+      assert.equal(response.json().error.code, 'SEMANTICS_UNVERIFIED');
+    }
+    assert.equal(calls.length, 0);
+  }, disabledConfig);
+});
+
+test('single truck: the stored locked total is returned with the truck echoed and truck limitations', async () => {
+  await withApp(() => [driverRow({ records: 2, authoritativeTotal: '8123.45' })], async app => {
+    const response = await app.inject(summaryUrl(truckQuery));
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(response.json(), {
+      data: { ...expectedSuccess.data, truckId: 12345, amount: '8123.45', totalTaskCount: 2, lockedTaskCount: 2 },
+      meta: { ...expectedSuccess.meta, limitations: [...truckFixedCostPilotSingleTruckLimitations] },
+    });
+    assert.deepEqual(Object.keys(response.json().data), ['allocationScope', 'truckId', 'periodMonth', 'amount', 'currency', 'representation', 'totalTaskCount', 'lockedTaskCount']);
+    const { limitations } = response.json().meta;
+    for (const pattern of requiredLimitations) assert.ok(limitations.some((entry: string) => pattern.test(entry)), String(pattern));
+    assert.ok(limitations.some((entry: string) => /uzdavinio_masina.*absent from uzdaviniai.*excluded/.test(entry)));
+    assert.ok(!limitations.some((entry: string) => /remain in the included population/.test(entry)), 'Orphan rows cannot be in a single-truck population');
+    assert.deepEqual(limitations, [...limitations].sort());
+  });
+});
+
+test('single truck: a real fully locked stored zero is 0.00', async () => {
+  await withApp(() => [driverRow({ records: 1, authoritativeTotal: '0.00' })], async app => {
+    const response = await app.inject(summaryUrl(truckQuery));
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().data.amount, '0.00');
+    assert.equal(response.json().data.totalTaskCount, 1);
+  });
+});
+
+test('single truck: no included records, or only deleted = 1 records, is NO_DATA_FOR_PERIOD', async () => {
+  for (const rows of [[], [driverRow({ deletedState: 'one', records: 4 })], [driverRow({ records: 0 })]]) {
+    await withApp(() => rows, async (app, calls) => {
+      const response = await app.inject(summaryUrl(truckQuery));
+      assert.equal(response.statusCode, 422);
+      assert.equal(response.json().error.code, 'NO_DATA_FOR_PERIOD');
+      assert.doesNotMatch(response.body, /"amount":|0\.00/);
+      assert.equal(calls.length, 1);
+    });
+  }
+});
+
+test('single truck: unlocked, unknown lock, missing total, truncation and period refusals are unchanged', async () => {
+  const cases: [unknown[], string][] = [
+    [[driverRow({ unlocked: 1 })], 'PERIOD_NOT_FULLY_LOCKED'],
+    [[driverRow({ unknown: 1 })], 'PERIOD_NOT_FULLY_LOCKED'],
+    [[driverRow({ missingTotal: 1 })], 'INCOMPLETE_RESULT'],
+    [[driverRow({ deletedState: 'other', records: 1 }), driverRow()], 'INCOMPLETE_RESULT'],
+    [[driverRow({ records: fixedCostMonetaryMaxRecords + 1 })], 'INCOMPLETE_RESULT'],
+  ];
+  for (const [rows, code] of cases) {
+    await withApp(() => rows, async app => {
+      const response = await app.inject(summaryUrl(truckQuery));
+      assert.equal(response.statusCode, 422, code);
+      assert.equal(response.json().error.code, code);
+      assert.doesNotMatch(response.body, /1234567|"amount":/);
+    });
+  }
+  await withApp(() => [driverRow()], async (app, calls) => {
+    assert.equal((await app.inject(summaryUrl('allocationScope=truck&dateFrom=2025-03-01&dateTo=2025-03-30&truckId=12345'))).json().error.code, 'PERIOD_NOT_COMPLETE_MONTH');
+    assert.equal((await app.inject(summaryUrl(`${monthOffset(-1)}&truckId=12345`))).json().error.code, 'PERIOD_NOT_SETTLED');
+    assert.equal(calls.length, 0, 'Period refusals still happen before replica access');
+  });
+});
+
+test('single truck: deleted = 1 is still excluded from the amount and counts', async () => {
+  await withApp(() => [driverRow({ deletedState: 'one', records: 9, authoritativeTotal: '999999.99' }), driverRow({ records: 2, authoritativeTotal: '10.50' })], async (app, calls) => {
+    const response = await app.inject(summaryUrl(truckQuery));
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().data.amount, '10.50');
+    assert.equal(response.json().data.totalTaskCount, 2);
+    assert.match(calls[0].sql, /GROUP BY r\.deletedState/, 'Deleted states are still separated before the pilot policy');
+  });
+});
+
+test('single truck: the projection requires the repository truck filter to match the request', () => {
+  assert.equal(projectTruckFixedCostPilotSummary(lockedResult([{}], { truckFilterApplied: true }), month, 12345).data.truckId, 12345);
+  assert.throws(() => projectTruckFixedCostPilotSummary(lockedResult([{}], { truckFilterApplied: false }), month, 12345), InvalidFixedCostMonetaryResult,
+    'A fleet read must never be reported as one truck');
+  assert.throws(() => projectTruckFixedCostPilotSummary(lockedResult([{}], { truckFilterApplied: true }), month), InvalidFixedCostMonetaryResult,
+    'A filtered read must never be reported as the fleet');
+});
+
+test('single truck: authentication, timeout, busy, sanitized errors and value-free telemetry are unchanged', async () => {
+  await withApp(() => [driverRow()], async (app, calls) => {
+    for (const headers of [{}, { authorization: 'Bearer wrong-token-that-is-longer-than-thirty-two-chars' }]) {
+      const response = await app.inject({ url: summaryUrl(truckQuery), headers });
+      assert.equal(response.statusCode, 401);
+      assert.equal(response.json().error.code, 'UNAUTHORIZED');
+    }
+    assert.equal(calls.length, 0);
+    assert.equal((await app.inject({ url: summaryUrl(truckQuery), headers: auth })).statusCode, 200);
+  }, enabledConfig, true);
+
+  await withApp(() => { throw Object.assign(new Error('SELECT secret WHERE uzdavinio_masina = 12345'), { code: 'ER_STATEMENT_TIMEOUT' }); }, async app => {
+    const response = await app.inject(summaryUrl(truckQuery));
+    assert.equal(response.statusCode, 504);
+    assert.deepEqual(response.json(), { error: { code: 'QUERY_TIMEOUT', message: 'Fixed-cost query timed out' } });
+  });
+  await withApp(() => { throw Object.assign(new Error('connect ECONNREFUSED private-host truck 12345'), { code: 'ECONNREFUSED' }); }, async app => {
+    const response = await app.inject(summaryUrl(truckQuery));
+    assert.equal(response.statusCode, 503);
+    assert.deepEqual(response.json(), { error: { code: 'REPLICA_UNAVAILABLE', message: 'Fixed-cost data temporarily unavailable' } });
+  });
+  const busyConfig = loadConfig({
+    ...baseEnvironment, [pilotFlag]: 'true',
+    ERP_ANALYTICS_CONCURRENCY: '1', ERP_ANALYTICS_QUEUE_LIMIT: '1', ERP_ANALYTICS_QUEUE_TIMEOUT_MS: '1',
+  });
+  await withApp(() => [driverRow()], async (app, calls) => {
+    let release!: () => void;
+    const held = app.analyticsGate.run(() => new Promise<void>(resolve => { release = resolve; }));
+    try {
+      const response = await app.inject(summaryUrl(truckQuery));
+      assert.equal(response.statusCode, 503);
+      assert.deepEqual(response.json(), { error: { code: 'SERVICE_BUSY', message: 'Analytical service is busy' } });
+      assert.equal(calls.length, 0);
+    } finally { release(); await held; }
+  }, busyConfig);
+
+  const events: Record<string, unknown>[] = [];
+  for (const rows of [[driverRow({ authoritativeTotal: '7654321.98' })], [], [driverRow({ unlocked: 1 })]]) {
+    await withApp(() => rows, async app => {
+      app.addHook('onRequest', async request => {
+        const capture = (event: Record<string, unknown>) => { events.push(event); };
+        request.log = Object.assign(Object.create(request.log), { info: capture, warn: capture });
+      });
+      await app.inject(summaryUrl(truckQuery));
+    });
+  }
+  const pilot = events.filter(event => event.operation === 'fixed_cost.truck_summary_pilot');
+  assert.deepEqual(pilot.map(event => event.outcome), ['success', 'refused', 'refused']);
+  assert.doesNotMatch(JSON.stringify(events), /12345|truckId|truck_id|7654321|2025-03|uzdavinio_masina/, 'No truck identifier, amount or period in telemetry');
+});
+
+// --- single-truck breakdown (truckId) ------------------------------------------
+
+const breakdownUrl = (query: string) => `/expense-analytics/fixed-costs/breakdown?${query}`;
+
+/** Current read first, then locked, exactly as the 7A orchestration calls its executor. */
+const perRepresentation = (current: unknown[], locked: unknown[]) => {
+  let call = 0;
+  return () => (call++ === 0 ? current : locked);
+};
+
+test('breakdown without truckId is unchanged: fleet-wide stays 422 and 7A parameters stay 400', async () => {
+  for (const config of [enabledConfig, disabledConfig]) {
+    await withApp(() => [driverRow()], async (app, calls) => {
+      for (const query of ['allocationScope=truck', validQuery]) {
+        const response = await app.inject(breakdownUrl(query));
+        assert.equal(response.statusCode, 422, query);
+        assert.deepEqual(response.json().error.code, 'SEMANTICS_UNVERIFIED');
+      }
+      for (const extra of ['groupBy=truck', 'truckIds=1', 'page=1', 'perPage=10', 'sortBy=truckId', 'groupBy=costComponent']) {
+        assert.equal((await app.inject(breakdownUrl(`${truckQuery}&${extra}`))).statusCode, 400, extra);
+      }
+      assert.equal(calls.length, 0);
+    }, config);
+  }
+});
+
+test('single-truck breakdown: two bound reads return the unchanged 7A shape for exactly one truck', async () => {
+  const current = driverRow({ records: 2, authoritativeTotal: '9100.00', componentTotal: '9099.10' });
+  const locked = driverRow({ records: 2, authoritativeTotal: '9050.25', componentTotal: '9050.00' });
+  await withApp(perRepresentation([current], [locked]), async (app, calls) => {
+    const response = await app.inject(breakdownUrl(truckQuery));
+    assert.equal(response.statusCode, 200);
+    const { data, meta } = response.json();
+
+    // Two independent reads, current then locked, each with the one bound truck predicate.
+    assert.equal(calls.length, 2);
+    assert.match(calls[0].sql, /a\.kastaiVilkiko,/);
+    assert.match(calls[1].sql, /a\.locked_kastaiVilkiko,/);
+    for (const call of calls) {
+      assert.deepEqual(call.values, ['2025-03-01', '2025-04-01', 12345]);
+      assert.equal(call.sql.split(truckFilterSql).length, 2);
+      assert.ok(!call.sql.includes('12345'), 'truckId is never interpolated');
+    }
+
+    assert.deepEqual(Object.keys(data), ['allocationScope', 'dateFrom', 'dateTo', 'currency', 'groups', 'unresolved']);
+    assert.deepEqual({ ...data, groups: undefined }, { allocationScope: 'truck', dateFrom: '2025-03-01', dateTo: '2025-03-31', currency: 'EUR', groups: undefined, unresolved: null });
+    assert.equal(data.groups.length, 1);
+    const [group] = data.groups;
+    assert.deepEqual(Object.keys(group), ['truckId', 'currentAmount', 'lockedAmount', 'taskCount', 'lockStates', 'reconciliation']);
+    assert.equal(group.truckId, 12345);
+    assert.equal(group.currentAmount, '9100.00', 'Stored current total, never a component sum');
+    assert.equal(group.lockedAmount, '9050.25', 'Stored locked total, never a component sum');
+    assert.equal(group.taskCount, 2);
+    assert.deepEqual(group.lockStates, { locked: 2, unlocked: 0, unknown: 0 });
+    // Components are explanatory only: their total may differ from the stored total and is not forced to match.
+    assert.equal(group.reconciliation.current.componentTotal, '9099.10');
+    assert.equal(group.reconciliation.locked.componentTotal, '9050.00');
+    assert.equal(group.reconciliation.locked.netDifference, '0.15');
+    for (const representation of ['current', 'locked']) {
+      assert.deepEqual(Object.keys(group.reconciliation[representation]), ['status', 'comparableRecords', 'affectedRecords', 'componentTotal',
+        'netDifference', 'grossAbsoluteDifference', 'buckets', 'noDetailRecords', 'multipleDetailRecords'], 'Aggregate reconciliation only');
+    }
+    const serialized = JSON.stringify(data);
+    for (const field of fixedCostComponentFields) assert.ok(!serialized.includes(field), `No per-component amount: ${field}`);
+
+    assert.equal(meta.groupBy, 'truck');
+    assert.equal(meta.complete, true);
+    assert.equal(meta.reconciliationStatus, 'unreconciled');
+    assert.deepEqual(meta.periodMonths, ['2025-03-01']);
+    assert.deepEqual(meta.pagination, { page: 1, perPage: 50, groupCount: 1, pageCount: 1, maxGroups: 1000 });
+    assert.deepEqual(meta.deletedRowPolicy, { ...truckFixedCostPilotDeletedRowPolicy });
+    assert.equal(meta.componentInventory.independentlyAdditive, false);
+    assert.equal(meta.groupingAvailability.costComponent.status, 'blocked');
+  });
+});
+
+test('single-truck breakdown: invalid truckId is 400 before replica access', async () => {
+  for (const config of [enabledConfig, disabledConfig]) {
+    await withApp(() => [driverRow()], async (app, calls) => {
+      for (const value of ['', '0', '-1', '05', '1.5', '1e3', 'abc', 'HOO756', '1%20OR%201=1', '9007199254740992']) {
+        const response = await app.inject(breakdownUrl(`${validQuery}&truckId=${value}`));
+        assert.equal(response.statusCode, 400, value);
+        assert.deepEqual(response.json(), { error: { code: 'INVALID_QUERY', message: 'Invalid fixed-cost query' } });
+      }
+      for (const extra of ['truckId=1&truckId=2', 'truckId=1,2', 'plateNumber=HOO756']) {
+        assert.equal((await app.inject(breakdownUrl(`${validQuery}&${extra}`))).statusCode, 400, extra);
+      }
+      assert.equal(calls.length, 0);
+    }, config);
+  }
+});
+
+test('single-truck breakdown: no included records is NO_DATA_FOR_PERIOD, never an empty or zero group', async () => {
+  for (const rows of [[], [driverRow({ deletedState: 'one', records: 4 })]]) {
+    await withApp(() => rows, async (app, calls) => {
+      const response = await app.inject(breakdownUrl(truckQuery));
+      assert.equal(response.statusCode, 422);
+      assert.equal(response.json().error.code, 'NO_DATA_FOR_PERIOD');
+      assert.doesNotMatch(response.body, /"groups"|"currentAmount"|"lockedAmount"/);
+      assert.equal(calls.length, 1, 'The first read already refuses');
+    });
+  }
+});
+
+test('single-truck breakdown: deleted = 1 is excluded under the unchanged pilot policy', async () => {
+  const withDeleted = (total: string) => [driverRow({ deletedState: 'one', records: 7, authoritativeTotal: '999999.99' }), driverRow({ records: 2, authoritativeTotal: total })];
+  await withApp(perRepresentation(withDeleted('20.00'), withDeleted('10.50')), async app => {
+    const response = await app.inject(breakdownUrl(truckQuery));
+    assert.equal(response.statusCode, 200);
+    const [group] = response.json().data.groups;
+    assert.equal(group.currentAmount, '20.00');
+    assert.equal(group.lockedAmount, '10.50');
+    assert.equal(group.taskCount, 2);
+    assert.ok(response.json().meta.limitations.some((entry: string) => /non-zero deleted flag are excluded/.test(entry)));
+  });
+});
+
+test('single-truck breakdown: unlocked, incomplete, truncated and period refusals match the summary', async () => {
+  const cases: [unknown[], string][] = [
+    [[driverRow({ unlocked: 1 })], 'PERIOD_NOT_FULLY_LOCKED'],
+    [[driverRow({ unknown: 1 })], 'PERIOD_NOT_FULLY_LOCKED'],
+    [[driverRow({ missingTotal: 1 })], 'INCOMPLETE_RESULT'],
+    [[driverRow({ deletedState: 'other', records: 1 }), driverRow()], 'INCOMPLETE_RESULT'],
+    [[driverRow({ records: fixedCostMonetaryMaxRecords + 1 })], 'INCOMPLETE_RESULT'],
+  ];
+  for (const [rows, code] of cases) {
+    await withApp(() => rows, async app => {
+      const response = await app.inject(breakdownUrl(truckQuery));
+      assert.equal(response.statusCode, 422, code);
+      assert.equal(response.json().error.code, code);
+    });
+  }
+  // A locked read that disagrees with the current read's population is never presented.
+  await withApp(perRepresentation([driverRow({ records: 3 })], [driverRow({ records: 2 })]), async app => {
+    assert.equal((await app.inject(breakdownUrl(truckQuery))).json().error.code, 'INCOMPLETE_RESULT');
+  });
+  await withApp(() => [driverRow()], async (app, calls) => {
+    assert.equal((await app.inject(breakdownUrl('allocationScope=truck&dateFrom=2025-03-01&dateTo=2025-03-30&truckId=12345'))).json().error.code, 'PERIOD_NOT_COMPLETE_MONTH');
+    assert.equal((await app.inject(breakdownUrl(`${monthOffset(-1)}&truckId=12345`))).json().error.code, 'PERIOD_NOT_SETTLED');
+    assert.equal(calls.length, 0);
+  });
+});
+
+test('single-truck breakdown keeps auth, sanitized errors and value-free telemetry; summary is unaffected', async () => {
+  await withApp(() => [driverRow()], async (app, calls) => {
+    assert.equal((await app.inject(breakdownUrl(truckQuery))).statusCode, 401);
+    assert.equal(calls.length, 0);
+    assert.equal((await app.inject({ url: breakdownUrl(truckQuery), headers: auth })).statusCode, 200);
+  }, enabledConfig, true);
+  await withApp(() => { throw Object.assign(new Error('SELECT secret uzdavinio_masina = 12345'), { code: 'ER_STATEMENT_TIMEOUT' }); }, async app => {
+    const response = await app.inject(breakdownUrl(truckQuery));
+    assert.equal(response.statusCode, 504);
+    assert.doesNotMatch(response.body, /SELECT|12345/);
+  });
+  const events: Record<string, unknown>[] = [];
+  await withApp(() => [driverRow({ authoritativeTotal: '7654321.98' })], async app => {
+    app.addHook('onRequest', async request => {
+      const capture = (event: Record<string, unknown>) => { events.push(event); };
+      request.log = Object.assign(Object.create(request.log), { info: capture, warn: capture });
+    });
+    await app.inject(breakdownUrl(truckQuery));
+  });
+  const pilot = events.filter(event => event.operation === 'fixed_cost.truck_breakdown_pilot');
+  assert.deepEqual(pilot.map(event => [event.outcome, event.endpoint, event.group_count]), [['success', '/expense-analytics/fixed-costs/breakdown', 1]]);
+  assert.doesNotMatch(JSON.stringify(events), /12345|7654321|2025-03|uzdavinio_masina/);
+
+  await withApp(() => [driverRow()], async app => {
+    assert.deepEqual((await app.inject(summaryUrl(validQuery))).json(), expectedSuccess, 'Fleet summary unchanged');
+    assert.equal((await app.inject(summaryUrl(truckQuery))).json().data.truckId, 12345, 'Single-truck summary unchanged');
+  });
+});
+
+test('mutation: breakdown resolves only for truck scope, the flag and one truckId', () => {
+  const on = { truckSummaryPilotEnabled: true };
+  assert.deepEqual(resolveFixedCostCapability('breakdown', 'truck', on, { truckId: 1 }), { enabled: true, mode: 'truck_breakdown_pilot' });
+  assert.deepEqual(resolveFixedCostCapability('breakdown', 'truck', on), { enabled: false });
+  assert.deepEqual(resolveFixedCostCapability('breakdown', 'truck', { truckSummaryPilotEnabled: false }, { truckId: 1 }), { enabled: false });
+  assert.deepEqual(resolveFixedCostCapability('breakdown', 'trailer', on, { truckId: 1 }), { enabled: false });
+  assert.deepEqual(resolveFixedCostCapability('dimensions', 'truck', on, { truckId: 1 }), { enabled: false });
+  assert.deepEqual(resolveFixedCostCapability('summary', 'truck', on), { enabled: true, mode: 'truck_summary_pilot' });
+  assert.equal(Object.values(fixedCostSemanticCapabilities).every(entry => entry.enabled === false), true, 'Static registry stays all-disabled');
 });

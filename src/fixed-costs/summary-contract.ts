@@ -22,13 +22,15 @@ export interface TruckFixedCostSummaryRequest {
   allocationScope: typeof fixedCostSummaryScope;
   dateFrom: string;
   dateTo: string;
+  /** Restricts the population to one canonical ERP truck ID. Absent means fleet-wide. */
+  truckId?: number;
 }
 
 /**
  * Strict public request validation.
  *
  * Allowed inputs are exactly `allocationScope=truck` plus a paired `dateFrom` and
- * `dateTo`. The shared parser already rejects unknown parameters, repeated query
+ * `dateTo`, and optionally one positive integer `truckId`. The shared parser already rejects unknown parameters, repeated query
  * parameters (Fastify yields an array, which is not a string), non-canonical dates,
  * reversed ranges and ranges beyond the documented maximum; summary additionally
  * requires the scope to be `truck` and the date pair to be present.
@@ -38,10 +40,13 @@ export interface TruckFixedCostSummaryRequest {
  * a caller or a model supplies can reach the generated SQL beyond bound values.
  */
 export function parseTruckFixedCostSummaryRequest(input: Record<string, unknown>): TruckFixedCostSummaryRequest {
-  const parsed = parseFixedCostRequest(input);
+  const parsed = parseFixedCostRequest(input, { allowTruckId: true });
   if (parsed.allocationScope !== fixedCostSummaryScope) throw new InvalidFixedCostQuery();
   if (parsed.dateFrom === undefined || parsed.dateTo === undefined) throw new InvalidFixedCostQuery();
-  return { allocationScope: fixedCostSummaryScope, dateFrom: parsed.dateFrom, dateTo: parsed.dateTo };
+  return {
+    allocationScope: fixedCostSummaryScope, dateFrom: parsed.dateFrom, dateTo: parsed.dateTo,
+    ...(parsed.truckId === undefined ? {} : { truckId: parsed.truckId }),
+  };
 }
 
 export { fixedCostMaximumDateRangeDays };
