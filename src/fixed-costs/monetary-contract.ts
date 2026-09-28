@@ -1,3 +1,4 @@
+import type { FixedCostComponentAmounts } from './monetary-repository.js';
 import {
   fixedCostDifferenceBuckets, parseFixedCostReconciliationMonth,
   type FixedCostDifferenceBucket,
@@ -82,6 +83,8 @@ export interface FixedCostMonetaryQuery {
   truckIds?: number[];
   /** Deterministic record bound; a truncated month never yields a monetary result. */
   limit: number;
+  /** Also read per-component comparable sums. Internal flag, never request input. */
+  includeComponents?: true;
 }
 
 /**
@@ -96,7 +99,7 @@ export function parseFixedCostMonetaryQuery(input: unknown, now?: Date): FixedCo
     || ![Object.prototype, null].includes(Object.getPrototypeOf(input))) {
     throw new InvalidFixedCostMonetaryQuery();
   }
-  const allowed = new Set(['allocationScope', 'representation', 'periodMonth', 'truckIds', 'limit']);
+  const allowed = new Set(['allocationScope', 'representation', 'periodMonth', 'truckIds', 'limit', 'includeComponents']);
   for (const key of Reflect.ownKeys(input)) {
     if (typeof key !== 'string' || !allowed.has(key)) throw new InvalidFixedCostMonetaryQuery();
   }
@@ -121,6 +124,10 @@ export function parseFixedCostMonetaryQuery(input: unknown, now?: Date): FixedCo
     throw new InvalidFixedCostMonetaryQuery('Limit must be a positive integer within the hard maximum');
   }
 
+  if (source.includeComponents !== undefined && source.includeComponents !== true) {
+    throw new InvalidFixedCostMonetaryQuery('includeComponents is either absent or true');
+  }
+
   let truckIds: number[] | undefined;
   if (source.truckIds !== undefined) {
     const values = source.truckIds;
@@ -143,6 +150,7 @@ export function parseFixedCostMonetaryQuery(input: unknown, now?: Date): FixedCo
     periodEnd: period.monthEnd,
     ...(truckIds === undefined ? {} : { truckIds }),
     limit,
+    ...(source.includeComponents === true ? { includeComponents: true as const } : {}),
   };
 }
 
@@ -244,6 +252,12 @@ export interface FixedCostMonetaryGroup {
   lockedRecords: number;
   unlockedRecords: number;
   unknownLockRecords: number;
+  /**
+   * Present only when the query set `includeComponents`. Per-component sums over
+   * the same comparable records as `componentTotal`, so together they add up to
+   * `componentTotal`, not to the authoritative total. Null without comparable records.
+   */
+  components?: FixedCostComponentAmounts | null;
 }
 
 export interface FixedCostMonetaryResult {
