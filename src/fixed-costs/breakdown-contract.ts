@@ -3,7 +3,7 @@ import {
   fixedCostAuthoritativeSource, fixedCostBreakdownSources,
   type DecimalString, type FixedCostDeletedRowPolicy,
 } from './monetary-contract.js';
-import { fixedCostComponentFields } from './monetary-repository.js';
+import { fixedCostComponentFields, type FixedCostComponentAmounts } from './monetary-repository.js';
 import type { FixedCostDifferenceBucket } from './reconciliation-contract.js';
 import { orderFixedCostLimitations } from './summary-contract.js';
 
@@ -190,6 +190,13 @@ export interface TruckFixedCostBreakdownReconciliation {
   buckets: Record<FixedCostDifferenceBucket, number>;
   noDetailRecords: number;
   multipleDetailRecords: number;
+  /**
+   * Per-component amounts from this representation's own detail table, keyed by
+   * the exact ERP column name. Explanatory only: they sum to `componentTotal` over
+   * the same comparable records, not to the authoritative amount. Null without
+   * comparable records; absent when the executor did not read components.
+   */
+  components?: FixedCostComponentAmounts | null;
 }
 
 /**

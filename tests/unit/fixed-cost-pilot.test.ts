@@ -46,6 +46,8 @@ function driverRow(options: {
   missingTotal?: number;
   authoritativeTotal?: unknown;
   componentTotal?: string;
+  /** Per-component comparable sums; defaults to the whole componentTotal in amortizacija. */
+  components?: Record<string, unknown>;
 } = {}) {
   const records = options.records ?? 3;
   const missingTotal = options.missingTotal ?? 0;
@@ -71,6 +73,9 @@ function driverRow(options: {
     lockedRecords: options.locked ?? records - unlocked - unknown,
     unlockedRecords: unlocked,
     unknownLockRecords: unknown,
+    ...Object.fromEntries(fixedCostComponentFields.map(field => [`component_${field}`, comparable === 0 ? null
+      : options.components !== undefined ? options.components[field] ?? '0.00'
+        : field === 'amortizacija' ? options.componentTotal ?? '1234566.95' : '0.00'])),
   };
 }
 
@@ -1026,10 +1031,9 @@ test('single-truck breakdown: two bound reads return the unchanged 7A shape for 
     assert.equal(group.reconciliation.locked.netDifference, '0.15');
     for (const representation of ['current', 'locked']) {
       assert.deepEqual(Object.keys(group.reconciliation[representation]), ['status', 'comparableRecords', 'affectedRecords', 'componentTotal',
-        'netDifference', 'grossAbsoluteDifference', 'buckets', 'noDetailRecords', 'multipleDetailRecords'], 'Aggregate reconciliation only');
+        'netDifference', 'grossAbsoluteDifference', 'buckets', 'noDetailRecords', 'multipleDetailRecords', 'components'], 'Only components is added');
+      assert.deepEqual(Object.keys(group.reconciliation[representation].components), [...fixedCostComponentFields], 'Exact ERP column names');
     }
-    const serialized = JSON.stringify(data);
-    for (const field of fixedCostComponentFields) assert.ok(!serialized.includes(field), `No per-component amount: ${field}`);
 
     assert.equal(meta.groupBy, 'truck');
     assert.equal(meta.complete, true);
@@ -1147,4 +1151,106 @@ test('mutation: breakdown resolves only for truck scope, the flag and one truckI
   assert.deepEqual(resolveFixedCostCapability('dimensions', 'truck', on, { truckId: 1 }), { enabled: false });
   assert.deepEqual(resolveFixedCostCapability('summary', 'truck', on), { enabled: true, mode: 'truck_summary_pilot' });
   assert.equal(Object.values(fixedCostSemanticCapabilities).every(entry => entry.enabled === false), true, 'Static registry stays all-disabled');
+});
+
+// --- single-truck breakdown component amounts ----------------------------------
+
+const lockedDetailRead = /FROM kastai_fiksuoti_vilkikai_det_locked d WHERE/;
+const currentDetailRead = /FROM kastai_fiksuoti_vilkikai_det d WHERE/;
+
+test('single-truck breakdown: component amounts come from each representation\'s own detail read', async () => {
+  const lockedComponents = { amortizacija: '553.04', lizingas: '156.86', remontas: '729.12', ruosimasGrazinimui: '60.14', draudiminiuRemontuDedamoji: '47.12', padangos: '0.00' };
+  const currentComponents = { amortizacija: '600.00', lizingas: '100.00' };
+  const current = driverRow({ records: 2, authoritativeTotal: '2000.00', componentTotal: '700.00', components: currentComponents });
+  const locked = driverRow({ records: 2, authoritativeTotal: '1982.76', componentTotal: '1546.28', components: lockedComponents });
+  await withApp(perRepresentation([current], [locked]), async (app, calls) => {
+    const response = await app.inject(breakdownUrl(truckQuery));
+    assert.equal(response.statusCode, 200);
+    const [group] = response.json().data.groups;
+
+    // Authoritative amounts and componentTotal are the stored/SQL values, untouched.
+    assert.equal(group.lockedAmount, '1982.76');
+    assert.equal(group.currentAmount, '2000.00');
+    assert.equal(group.reconciliation.locked.componentTotal, '1546.28');
+    assert.equal(group.reconciliation.current.componentTotal, '700.00');
+
+    // Locked components are the locked read's columns; current are the current read's. Never mixed.
+    const expected = (values: Record<string, string>) => Object.fromEntries(fixedCostComponentFields.map(field => [field, values[field] ?? '0.00']));
+    assert.deepEqual(group.reconciliation.locked.components, expected(lockedComponents));
+    assert.deepEqual(group.reconciliation.current.components, expected(currentComponents));
+
+    // Each read sums every component from its own detail table only, and binds the truck exactly once.
+    assert.match(calls[0].sql, currentDetailRead);
+    assert.doesNotMatch(calls[0].sql, lockedDetailRead);
+    assert.match(calls[1].sql, lockedDetailRead);
+    assert.doesNotMatch(calls[1].sql, currentDetailRead);
+    for (const call of calls) {
+      assert.deepEqual(call.values, ['2025-03-01', '2025-04-01', 12345]);
+      for (const field of fixedCostComponentFields) assert.match(call.sql, new RegExp(`SUM\\(d\\.${field}\\) FROM`), field);
+    }
+  });
+});
+
+test('single-truck breakdown: a component/authoritative mismatch is preserved, not fixed', async () => {
+  // Components sum to 1546.28 while the stored locked total is 1982.76.
+  const row = driverRow({ records: 1, authoritativeTotal: '1982.76', componentTotal: '1546.28',
+    components: { amortizacija: '553.04', lizingas: '156.86', remontas: '729.12', ruosimasGrazinimui: '60.14', draudiminiuRemontuDedamoji: '47.12' } });
+  await withApp(() => [row], async app => {
+    const response = await app.inject(breakdownUrl(truckQuery));
+    assert.equal(response.statusCode, 200);
+    const [group] = response.json().data.groups;
+    assert.equal(group.lockedAmount, '1982.76', 'The stored total stays authoritative');
+    assert.equal(group.reconciliation.locked.componentTotal, '1546.28', 'The component total is not stretched to the authoritative total');
+    assert.equal(group.reconciliation.locked.netDifference, row.netDifference, 'Difference evidence passes through unchanged');
+    assert.equal(group.reconciliation.locked.status, 'unreconciled');
+    assert.ok(!Object.keys(group.reconciliation.locked.components).some(key => /other|residual|unexplained/i.test(key)), 'No synthetic residual component');
+  });
+});
+
+test('single-truck breakdown: missing or malformed component amounts are INCOMPLETE_RESULT, never zero', async () => {
+  const cases = [
+    { ...driverRow(), component_lizingas: undefined },
+    { ...driverRow(), component_lizingas: null },
+    { ...driverRow(), component_lizingas: 12.5 },
+    { ...driverRow(), component_lizingas: '12.5e3' },
+    { ...driverRow({ missingTotal: 3, authoritativeTotal: '1.00' }), component_lizingas: '0.00' },
+  ];
+  for (const row of cases) {
+    await withApp(() => [row], async app => {
+      const response = await app.inject(breakdownUrl(truckQuery));
+      assert.equal(response.statusCode, 422);
+      assert.equal(response.json().error.code, 'INCOMPLETE_RESULT');
+      assert.doesNotMatch(response.body, /"components"/);
+    });
+  }
+});
+
+test('single-truck breakdown: no comparable records keeps components null, never zero-filled', async () => {
+  // Every record lacks exactly one detail row: stored totals exist, nothing is comparable.
+  const noDetail = { ...driverRow({ records: 2, authoritativeTotal: '50.00' }), comparableRecords: 0, noDetailRecords: 2,
+    comparableAuthoritativeTotal: null, componentTotal: null, netDifference: null, grossAbsoluteDifference: null, affectedRecords: 0,
+    bucket_exact: 0, bucket_rounding: 0,
+    ...Object.fromEntries(fixedCostComponentFields.map(field => [`component_${field}`, null])) };
+  await withApp(() => [noDetail], async app => {
+    const response = await app.inject(breakdownUrl(truckQuery));
+    assert.equal(response.statusCode, 200);
+    const [group] = response.json().data.groups;
+    assert.equal(group.lockedAmount, '50.00');
+    for (const representation of ['current', 'locked']) {
+      assert.equal(group.reconciliation[representation].componentTotal, null);
+      assert.equal(group.reconciliation[representation].components, null);
+      assert.equal(group.reconciliation[representation].status, 'structurally_non_comparable');
+    }
+  });
+});
+
+test('the summary and fleet breakdown never read component amounts', async () => {
+  await withApp(() => [driverRow()], async (app, calls) => {
+    assert.deepEqual((await app.inject(summaryUrl(validQuery))).json(), expectedSuccess, 'Fleet summary unchanged');
+    const single = await app.inject(summaryUrl(truckQuery));
+    assert.doesNotMatch(single.body, /components|amortizacija/);
+    assert.equal((await app.inject(breakdownUrl(validQuery))).statusCode, 422, 'Fleet breakdown still refused');
+    assert.equal(calls.length, 2);
+    for (const call of calls) assert.doesNotMatch(call.sql, /component_|\bc_/, 'Summary SQL has no component reads');
+  });
 });

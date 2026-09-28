@@ -131,6 +131,10 @@ function assertExecutorResult(
     for (const field of ['componentTotal', 'netDifference', 'grossAbsoluteDifference'] as const) {
       decimalOrNull(row.reconciliation[field], `reconciliation.${field}`);
     }
+    const { components } = row.reconciliation;
+    if (components !== undefined && components !== null) {
+      for (const [field, value] of Object.entries(components)) decimalOrNull(value, `reconciliation.components.${field}`);
+    }
     // A resolved truck comes from uzdaviniai.uzdavinio_masina, so its task row
     // exists by construction. A resolved group claiming missing tasks would lose
     // that population silently, because only the unresolved bucket reports it.
@@ -143,6 +147,9 @@ function assertExecutorResult(
         if (row.reconciliation[field] !== null) {
           throw new InvalidFixedCostMonetaryResult(`${field} must be null without comparable records`);
         }
+      }
+      if (row.reconciliation.components !== undefined && row.reconciliation.components !== null) {
+        throw new InvalidFixedCostMonetaryResult('components must be null without comparable records');
       }
       if (row.reconciliation.status !== 'structurally_non_comparable') {
         throw new InvalidFixedCostMonetaryResult('A group without comparable records must be structurally non-comparable');

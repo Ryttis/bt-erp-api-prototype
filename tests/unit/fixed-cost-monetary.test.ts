@@ -754,3 +754,20 @@ test('both representations filter the reporting period on the cost month and say
   const result = await run([groupRow()]);
   assert.ok(result.meta.limitations.some(entry => /lock-event metadata, never the period filter/.test(entry)));
 });
+
+test('component reads are opt-in, static, and leave the default statement unchanged', () => {
+  for (const representation of ['current', 'locked'] as const) {
+    const base = parseFixedCostMonetaryQuery({ ...baseQuery, representation }, now);
+    const plain = fixedCostMonetaryStatement(base);
+    const withComponents = fixedCostMonetaryStatement(parseFixedCostMonetaryQuery({ ...baseQuery, representation, includeComponents: true }, now));
+    assert.doesNotMatch(plain, /component_|\bc_/, 'Default statement reads no per-component column');
+    assert.equal(withComponents.replace(/,\n[^\n]*\bc_\w+[^\n]*?(?=,?\n|$)/g, ''), plain, 'Only component lines are added');
+    for (const field of fixedCostComponentFields) {
+      assert.ok(withComponents.includes(`(SELECT SUM(d.${field}) FROM ${fixedCostBreakdownSources[representation]} d WHERE d.uzdavinys = s.uzdavinys) AS c_${field}`), field);
+      assert.ok(withComponents.includes(`CAST(SUM(CASE WHEN r.comparable = 1 THEN r.c_${field} ELSE NULL END) AS CHAR) AS component_${field}`), field);
+    }
+  }
+  for (const includeComponents of [false, 'true', 1, null]) {
+    assert.throws(() => parseFixedCostMonetaryQuery({ ...baseQuery, includeComponents }, now), InvalidFixedCostMonetaryQuery);
+  }
+});

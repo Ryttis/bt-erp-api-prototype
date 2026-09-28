@@ -33,6 +33,10 @@ export const fixedCostComponentFields = [
   'ruosimasGrazinimui', 'draudiminiuRemontuDedamoji', 'general_administrative_expenses',
 ] as const;
 
+export type FixedCostComponentField = typeof fixedCostComponentFields[number];
+/** Per-component comparable sums as decimal text, keyed by the exact ERP column name. */
+export type FixedCostComponentAmounts = Readonly<Record<FixedCostComponentField, DecimalString>>;
+
 const componentSum = (alias: string) => fixedCostComponentFields.map(column => `${alias}.${column}`).join(' + ');
 
 // The authoritative amount column per representation. Read, never recomputed.
@@ -78,13 +82,22 @@ const bucketCounters = (difference: string) => fixedCostDifferenceLadder.map(({ 
  * `LIMIT` is applied after the period predicate and the optional truck predicate,
  * inside the same SELECT, so the bound always applies to the filtered population.
  */
-function buildStatement(representation: FixedCostRepresentation, truckPlaceholders: number, limit: number): string {
+function buildStatement(
+  representation: FixedCostRepresentation, truckPlaceholders: number, limit: number, includeComponents: boolean,
+): string {
   const authoritative = `s.${authoritativeColumn[representation]}`;
   const detailTable = fixedCostBreakdownSources[representation];
   const difference = 'ABS(r.authoritative - r.componentSum)';
   const truckFilter = truckPlaceholders > 0
     ? `\n        AND t.uzdavinio_masina IN (${Array.from({ length: truckPlaceholders }, () => '?').join(', ')})`
     : '';
+  // Optional per-component reads. Column names come only from the static verified
+  // list, and each sum covers the same comparable records as componentTotal.
+  const components = includeComponents ? fixedCostComponentFields : [];
+  const componentOutputs = components.map(column => `,\n    ${comparableSum(`r.c_${column}`, `component_${column}`)}`).join('');
+  const componentPassThrough = components.map(column => `,\n      j.c_${column}`).join('');
+  const componentReads = components
+    .map(column => `,\n        (SELECT SUM(d.${column}) FROM ${detailTable} d WHERE d.uzdavinys = s.uzdavinys) AS c_${column}`).join('');
   return `SELECT r.deletedState,
     COUNT(*) AS authoritativeRecords,
     ${decimalText('SUM(r.authoritative)', 'authoritativeTotal')},
@@ -101,14 +114,14 @@ function buildStatement(representation: FixedCostRepresentation, truckPlaceholde
     SUM(CASE WHEN r.taskId IS NULL THEN 1 ELSE 0 END) AS missingTaskCount,
     SUM(CASE WHEN r.lockState = 'unlocked' THEN 1 ELSE 0 END) AS unlockedRecords,
     SUM(CASE WHEN r.lockState = 'locked' THEN 1 ELSE 0 END) AS lockedRecords,
-    SUM(CASE WHEN r.lockState = 'unknown' THEN 1 ELSE 0 END) AS unknownLockRecords
+    SUM(CASE WHEN r.lockState = 'unknown' THEN 1 ELSE 0 END) AS unknownLockRecords${componentOutputs}
   FROM (
     SELECT
       CASE WHEN j.deleted = 0 THEN 'zero' WHEN j.deleted = 1 THEN 'one' ELSE 'other' END AS deletedState,
       j.authoritative,
       j.componentSum,
       j.detailRows,
-      j.taskId,
+      j.taskId${componentPassThrough},
       -- ERP confirmed on 2026-09-23 (FCB-05) that '0000-00-00' marks an unlocked
       -- truck result. Any other unusable date stays 'unknown' rather than being
       -- guessed in either direction.
@@ -120,7 +133,7 @@ function buildStatement(representation: FixedCostRepresentation, truckPlaceholde
       SELECT s.deleted, s.taskId, s.locked_kastaiVilkiko_data AS lockDate,
         ${authoritative} AS authoritative,
         (SELECT COUNT(*) FROM ${detailTable} d WHERE d.uzdavinys = s.uzdavinys) AS detailRows,
-        (SELECT SUM(${componentSum('d')}) FROM ${detailTable} d WHERE d.uzdavinys = s.uzdavinys) AS componentSum
+        (SELECT SUM(${componentSum('d')}) FROM ${detailTable} d WHERE d.uzdavinys = s.uzdavinys) AS componentSum${componentReads}
       FROM (
         SELECT a.uzdavinys, a.deleted, a.${authoritativeColumn[representation]}, a.locked_kastaiVilkiko_data, t.id AS taskId
         FROM kastai_fiksuoti_ataskaita a
@@ -136,7 +149,7 @@ function buildStatement(representation: FixedCostRepresentation, truckPlaceholde
 }
 
 export function fixedCostMonetaryStatement(query: FixedCostMonetaryQuery): string {
-  return buildStatement(query.representation, query.truckIds?.length ?? 0, query.limit);
+  return buildStatement(query.representation, query.truckIds?.length ?? 0, query.limit, query.includeComponents === true);
 }
 
 export class FixedCostMonetaryError extends ReplicaDiagnosticError {
@@ -181,7 +194,22 @@ function decimalOrNull(row: Record<string, unknown>, column: string): DecimalStr
   return assertDecimalString(value, column);
 }
 
-function projectGroup(row: Record<string, unknown>): FixedCostMonetaryGroup {
+/**
+ * Per-component comparable sums, with the same null rule as componentTotal: every
+ * component is null exactly when there is no comparable record. A partial set is
+ * malformed output, never a component quietly reported as zero.
+ */
+function projectComponents(row: Record<string, unknown>, comparableRecords: number): FixedCostComponentAmounts | null {
+  const values = fixedCostComponentFields.map(column => [column, decimalOrNull(row, `component_${column}`)] as const);
+  if (comparableRecords === 0) {
+    if (values.some(([, value]) => value !== null)) throw new InvalidFixedCostMonetaryResult('components must be null without comparable records');
+    return null;
+  }
+  if (values.some(([, value]) => value === null)) throw new InvalidFixedCostMonetaryResult('components must be decimal text with comparable records');
+  return Object.freeze(Object.fromEntries(values)) as FixedCostComponentAmounts;
+}
+
+function projectGroup(row: Record<string, unknown>, includeComponents: boolean): FixedCostMonetaryGroup {
   // A null or non-object driver row is malformed output, never an empty group.
   if (row === null || typeof row !== 'object' || Array.isArray(row)) throw new InvalidFixedCostMonetaryResult('Unexpected driver row');
   const deletedState = row.deletedState;
@@ -262,6 +290,7 @@ function projectGroup(row: Record<string, unknown>): FixedCostMonetaryGroup {
     lockedRecords,
     unlockedRecords,
     unknownLockRecords,
+    ...(includeComponents ? { components: projectComponents(row, comparableRecords) } : {}),
   };
 }
 
@@ -297,7 +326,7 @@ export async function queryFixedCostMonetaryTotals(
   }
 
   if (!Array.isArray(rows)) throw new InvalidFixedCostMonetaryResult('Unexpected driver result');
-  const groups = rows.map(projectGroup);
+  const groups = rows.map(row => projectGroup(row, query.includeComponents === true));
   const recordsRead = groups.reduce((total, group) => total + group.authoritativeRecords, 0);
   if (new Set(groups.map(group => group.deletedState)).size !== groups.length) {
     throw new InvalidFixedCostMonetaryResult('Duplicate declared row state group');

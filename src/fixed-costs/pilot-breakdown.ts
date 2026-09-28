@@ -2,7 +2,7 @@ import type { AnalyticsGate } from '../analytics-gate.js';
 import type { ReplicaPool } from '../db/replica.js';
 import { fixedCostBreakdownDefaultPageSize, type TruckFixedCostBreakdownResponse } from './breakdown-contract.js';
 import { buildTruckFixedCostBreakdown, type TruckBreakdownExecutor } from './breakdown-service.js';
-import { fixedCostMonetaryMaxRecords } from './monetary-contract.js';
+import { fixedCostMonetaryMaxRecords, InvalidFixedCostMonetaryResult } from './monetary-contract.js';
 import { queryFixedCostMonetaryTotals } from './monetary-repository.js';
 import {
   pilotIncludedGroup, resolveTruckFixedCostPilotMonth, truckFixedCostPilotDeletedRowPolicy,
@@ -21,8 +21,15 @@ import type { TruckFixedCostSummaryRequest } from './summary-contract.js';
  * Both reads reuse the existing repository with its bound truck allowlist
  * (`t.uzdavinio_masina IN (?)`) and apply the summary pilot's population rules, so
  * absent data, unlocked tasks and incomplete reads refuse exactly as the summary does.
- * Per-component amounts are not exposed: component additivity is unapproved (FC-06/FC-07).
+ *
+ * Each representation also reads its own per-component amounts
+ * (`reconciliation.<representation>.components`), from its own detail table and over
+ * the same comparable records as `componentTotal`. They are explanatory only: the
+ * authoritative amounts never derive from them, and a mismatch with the stored
+ * total is reported as-is. No component is grouped or labelled (FC-06/FC-07).
  */
+const invalid = (): never => { throw new InvalidFixedCostMonetaryResult('Component amounts missing from the breakdown read'); };
+
 export async function runTruckFixedCostPilotBreakdown(
   pool: ReplicaPool,
   gate: AnalyticsGate,
@@ -36,6 +43,7 @@ export async function runTruckFixedCostPilotBreakdown(
   const execute: TruckBreakdownExecutor = async ({ representation }) => {
     const result = await queryFixedCostMonetaryTotals(pool, gate, {
       allocationScope: 'truck', representation, periodMonth, limit: fixedCostMonetaryMaxRecords, truckIds: [truckId],
+      includeComponents: true,
     }, truckFixedCostPilotDeletedRowPolicy, now);
     const group = pilotIncludedGroup(result, representation, periodMonth, truckId);
     return {
@@ -59,6 +67,8 @@ export async function runTruckFixedCostPilotBreakdown(
           buckets: group.buckets,
           noDetailRecords: group.noDetailRecords,
           multipleDetailRecords: group.multipleDetailRecords,
+          // The repository returns components whenever includeComponents is set; absent means miswired.
+          components: group.components === undefined ? invalid() : group.components,
         },
       }],
     };
