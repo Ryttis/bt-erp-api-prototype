@@ -13,6 +13,7 @@ import { registerTripRoutes } from './trips/routes.js';
 import { isAuthorizedServiceRequest } from './auth.js';
 import { registerSchemaRoutes } from './schema/routes.js';
 import { registerFixedCostRoutes } from './fixed-costs/routes.js';
+import { registerTrailerRoutes } from './trailers/routes.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -63,6 +64,7 @@ export function buildApp(config: AppConfig, poolFactory = createReplicaPool, opt
   app.addHook('onClose', async () => { await pool.end(); });
   app.get('/health', async () => ({ status: 'ok' }));
   app.register(registerVehicleRoutes);
+  app.register(registerTrailerRoutes);
   app.register(registerBillingInvoiceRoutes);
   app.register(registerTripRoutes);
   app.register(registerOrderRoutes);
