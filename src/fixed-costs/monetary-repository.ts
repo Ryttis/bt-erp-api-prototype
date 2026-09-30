@@ -5,10 +5,11 @@ import {
   assertApprovedDeletedRowPolicy, assertDecimalString, emptyFixedCostBucketCounts,
   fixedCostAuthoritativeSource, fixedCostBreakdownSources, fixedCostDeletedStates,
   fixedCostMonetaryLimitations, fixedCostMonetaryMaxRecords, fixedCostMonetaryPendingApprovals,
+  fixedCostTrailerBreakdownSources, fixedCostTrailerMonetaryLimitations,
   InvalidFixedCostMonetaryResult, parseFixedCostMonetaryQuery, unapprovedFixedCostDeletedRowPolicy,
   type DecimalString, type FixedCostDeletedRowPolicy, type FixedCostDeletedState,
   type FixedCostMonetaryGroup, type FixedCostMonetaryQuery, type FixedCostMonetaryResult,
-  type FixedCostRepresentation,
+  type FixedCostMonetaryScope, type FixedCostRepresentation,
 } from './monetary-contract.js';
 import { fixedCostDifferenceBuckets, fixedCostDifferenceLadder } from './reconciliation-contract.js';
 
@@ -37,10 +38,46 @@ export type FixedCostComponentField = typeof fixedCostComponentFields[number];
 /** Per-component comparable sums as decimal text, keyed by the exact ERP column name. */
 export type FixedCostComponentAmounts = Readonly<Record<FixedCostComponentField, DecimalString>>;
 
-const componentSum = (alias: string) => fixedCostComponentFields.map(column => `${alias}.${column}`).join(' + ');
+// Verified trailer component field identifiers, identical in both trailer detail
+// tables (schema API, 2026-09-30). Source column names, not business categories.
+export const fixedCostTrailerComponentFields = [
+  'amortizacija', 'remontas', 'padangos', 'draudimai', 'lizingas', 'user_fee', 'preparation', 'insurance_repair',
+] as const;
 
-// The authoritative amount column per representation. Read, never recomputed.
-const authoritativeColumn = { current: 'kastaiVilkiko', locked: 'locked_kastaiVilkiko' } as const;
+export type FixedCostTrailerComponentField = typeof fixedCostTrailerComponentFields[number];
+export type FixedCostTrailerComponentAmounts = Readonly<Record<FixedCostTrailerComponentField, DecimalString>>;
+
+/**
+ * Everything that differs between the truck and trailer statements. Static module
+ * constants selected by the validated scope enum; no entry is ever caller text.
+ */
+const scopeSources = {
+  truck: {
+    // The authoritative amount column per representation. Read, never recomputed.
+    authoritativeColumn: { current: 'kastaiVilkiko', locked: 'locked_kastaiVilkiko' },
+    lockDateColumn: 'locked_kastaiVilkiko_data',
+    detailTables: fixedCostBreakdownSources,
+    componentFields: fixedCostComponentFields as readonly string[],
+    taskVehicleColumn: 'uzdavinio_masina',
+    lockComment: `-- ERP confirmed on 2026-09-23 (FCB-05) that '0000-00-00' marks an unlocked
+      -- truck result. Any other unusable date stays 'unknown' rather than being
+      -- guessed in either direction.`,
+  },
+  trailer: {
+    authoritativeColumn: { current: 'kastaiPriekabos', locked: 'locked_kastaiPriekabos' },
+    lockDateColumn: 'locked_kastaiPriekabos_data',
+    detailTables: fixedCostTrailerBreakdownSources,
+    componentFields: fixedCostTrailerComponentFields as readonly string[],
+    taskVehicleColumn: 'uzdavinio_priekaba',
+    lockComment: `-- The '0000-00-00' unlocked sentinel is ERP-confirmed for the truck lock date
+      -- (FCB-05) and applied to the trailer lock date by structural analogy. Any
+      -- other unusable date stays 'unknown' rather than being guessed.`,
+  },
+} as const;
+
+export const fixedCostComponentFieldsByScope = {
+  truck: fixedCostComponentFields, trailer: fixedCostTrailerComponentFields,
+} as const;
 
 const decimalText = (expression: string, alias: string) => `CAST(${expression} AS CHAR) AS ${alias}`;
 
@@ -83,17 +120,21 @@ const bucketCounters = (difference: string) => fixedCostDifferenceLadder.map(({ 
  * inside the same SELECT, so the bound always applies to the filtered population.
  */
 function buildStatement(
-  representation: FixedCostRepresentation, truckPlaceholders: number, limit: number, includeComponents: boolean,
+  scope: FixedCostMonetaryScope, representation: FixedCostRepresentation, truckPlaceholders: number, limit: number,
+  includeComponents: boolean,
 ): string {
-  const authoritative = `s.${authoritativeColumn[representation]}`;
-  const detailTable = fixedCostBreakdownSources[representation];
+  const source = scopeSources[scope];
+  const authoritativeColumn = source.authoritativeColumn[representation];
+  const authoritative = `s.${authoritativeColumn}`;
+  const detailTable = source.detailTables[representation];
+  const componentSum = (alias: string) => source.componentFields.map(column => `${alias}.${column}`).join(' + ');
   const difference = 'ABS(r.authoritative - r.componentSum)';
   const truckFilter = truckPlaceholders > 0
-    ? `\n        AND t.uzdavinio_masina IN (${Array.from({ length: truckPlaceholders }, () => '?').join(', ')})`
+    ? `\n        AND t.${source.taskVehicleColumn} IN (${Array.from({ length: truckPlaceholders }, () => '?').join(', ')})`
     : '';
   // Optional per-component reads. Column names come only from the static verified
   // list, and each sum covers the same comparable records as componentTotal.
-  const components = includeComponents ? fixedCostComponentFields : [];
+  const components = includeComponents ? source.componentFields : [];
   const componentOutputs = components.map(column => `,\n    ${comparableSum(`r.c_${column}`, `component_${column}`)}`).join('');
   const componentPassThrough = components.map(column => `,\n      j.c_${column}`).join('');
   const componentReads = components
@@ -122,20 +163,18 @@ function buildStatement(
       j.componentSum,
       j.detailRows,
       j.taskId${componentPassThrough},
-      -- ERP confirmed on 2026-09-23 (FCB-05) that '0000-00-00' marks an unlocked
-      -- truck result. Any other unusable date stays 'unknown' rather than being
-      -- guessed in either direction.
+      ${source.lockComment}
       CASE WHEN j.lockDate IS NULL THEN 'unknown'
         WHEN CAST(j.lockDate AS CHAR) = '0000-00-00' THEN 'unlocked'
         WHEN ${validLockDate('j.lockDate')} THEN 'locked' ELSE 'unknown' END AS lockState,
       CASE WHEN j.authoritative IS NOT NULL AND j.detailRows = 1 AND j.componentSum IS NOT NULL THEN 1 ELSE 0 END AS comparable
     FROM (
-      SELECT s.deleted, s.taskId, s.locked_kastaiVilkiko_data AS lockDate,
+      SELECT s.deleted, s.taskId, s.${source.lockDateColumn} AS lockDate,
         ${authoritative} AS authoritative,
         (SELECT COUNT(*) FROM ${detailTable} d WHERE d.uzdavinys = s.uzdavinys) AS detailRows,
         (SELECT SUM(${componentSum('d')}) FROM ${detailTable} d WHERE d.uzdavinys = s.uzdavinys) AS componentSum${componentReads}
       FROM (
-        SELECT a.uzdavinys, a.deleted, a.${authoritativeColumn[representation]}, a.locked_kastaiVilkiko_data, t.id AS taskId
+        SELECT a.uzdavinys, a.deleted, a.${authoritativeColumn}, a.${source.lockDateColumn}, t.id AS taskId
         FROM kastai_fiksuoti_ataskaita a
         LEFT JOIN uzdaviniai t ON t.id = a.uzdavinys
         WHERE a.kastai_data >= ? AND a.kastai_data < ?${truckFilter}
@@ -149,7 +188,9 @@ function buildStatement(
 }
 
 export function fixedCostMonetaryStatement(query: FixedCostMonetaryQuery): string {
-  return buildStatement(query.representation, query.truckIds?.length ?? 0, query.limit, query.includeComponents === true);
+  // The trailer scope always binds exactly one identifier; the truck scope binds its optional allowlist.
+  const placeholders = query.allocationScope === 'trailer' ? 1 : query.truckIds?.length ?? 0;
+  return buildStatement(query.allocationScope, query.representation, placeholders, query.limit, query.includeComponents === true);
 }
 
 export class FixedCostMonetaryError extends ReplicaDiagnosticError {
@@ -199,17 +240,19 @@ function decimalOrNull(row: Record<string, unknown>, column: string): DecimalStr
  * component is null exactly when there is no comparable record. A partial set is
  * malformed output, never a component quietly reported as zero.
  */
-function projectComponents(row: Record<string, unknown>, comparableRecords: number): FixedCostComponentAmounts | null {
-  const values = fixedCostComponentFields.map(column => [column, decimalOrNull(row, `component_${column}`)] as const);
+function projectComponents(
+  row: Record<string, unknown>, comparableRecords: number, fields: readonly string[],
+): FixedCostComponentAmounts | FixedCostTrailerComponentAmounts | null {
+  const values = fields.map(column => [column, decimalOrNull(row, `component_${column}`)] as const);
   if (comparableRecords === 0) {
     if (values.some(([, value]) => value !== null)) throw new InvalidFixedCostMonetaryResult('components must be null without comparable records');
     return null;
   }
   if (values.some(([, value]) => value === null)) throw new InvalidFixedCostMonetaryResult('components must be decimal text with comparable records');
-  return Object.freeze(Object.fromEntries(values)) as FixedCostComponentAmounts;
+  return Object.freeze(Object.fromEntries(values)) as FixedCostComponentAmounts | FixedCostTrailerComponentAmounts;
 }
 
-function projectGroup(row: Record<string, unknown>, includeComponents: boolean): FixedCostMonetaryGroup {
+function projectGroup(row: Record<string, unknown>, componentFields: readonly string[] | null): FixedCostMonetaryGroup {
   // A null or non-object driver row is malformed output, never an empty group.
   if (row === null || typeof row !== 'object' || Array.isArray(row)) throw new InvalidFixedCostMonetaryResult('Unexpected driver row');
   const deletedState = row.deletedState;
@@ -290,7 +333,7 @@ function projectGroup(row: Record<string, unknown>, includeComponents: boolean):
     lockedRecords,
     unlockedRecords,
     unknownLockRecords,
-    ...(includeComponents ? { components: projectComponents(row, comparableRecords) } : {}),
+    ...(componentFields === null ? {} : { components: projectComponents(row, comparableRecords, componentFields) }),
   };
 }
 
@@ -314,7 +357,10 @@ export async function queryFixedCostMonetaryTotals(
   assertApprovedDeletedRowPolicy(policy);
 
   const statement = fixedCostMonetaryStatement(query);
-  const values: (string | number)[] = [query.periodMonth, query.periodEnd, ...(query.truckIds ?? [])];
+  const trailer = query.allocationScope === 'trailer';
+  const source = scopeSources[query.allocationScope];
+  // Identifiers are only ever bound values, never statement text.
+  const values: (string | number)[] = [query.periodMonth, query.periodEnd, ...(trailer ? [query.trailerId!] : query.truckIds ?? [])];
   let rows: Record<string, unknown>[];
   try {
     rows = await gate.run(() => queryReadOnly<Record<string, unknown>[]>(pool, statement, values));
@@ -326,7 +372,7 @@ export async function queryFixedCostMonetaryTotals(
   }
 
   if (!Array.isArray(rows)) throw new InvalidFixedCostMonetaryResult('Unexpected driver result');
-  const groups = rows.map(row => projectGroup(row, query.includeComponents === true));
+  const groups = rows.map(row => projectGroup(row, query.includeComponents === true ? source.componentFields : null));
   const recordsRead = groups.reduce((total, group) => total + group.authoritativeRecords, 0);
   if (new Set(groups.map(group => group.deletedState)).size !== groups.length) {
     throw new InvalidFixedCostMonetaryResult('Duplicate declared row state group');
@@ -337,14 +383,14 @@ export async function queryFixedCostMonetaryTotals(
   return {
     groups,
     meta: {
-      allocationScope: 'truck',
+      allocationScope: query.allocationScope,
       representation: query.representation,
       periodMonth: query.periodMonth,
       dateBasis: 'kastai_data',
       currency: 'EUR',
       authoritativeSource: fixedCostAuthoritativeSource,
-      breakdownSource: fixedCostBreakdownSources[query.representation],
-      componentFields: fixedCostComponentFields,
+      breakdownSource: source.detailTables[query.representation],
+      componentFields: source.componentFields,
       classificationApplied: false,
       classificationVersion: null,
       semanticsVersion: null,
@@ -352,12 +398,13 @@ export async function queryFixedCostMonetaryTotals(
       recordsRead,
       missingTaskCount: groups.reduce((total, group) => total + group.missingTaskCount, 0),
       truckFilterApplied: query.truckIds !== undefined,
+      ...(trailer ? { trailerFilterApplied: true as const } : {}),
       truncated: false,
       complete: true,
       deletedRowPolicy: policy,
       reconciliationStatus: 'unreconciled',
       pendingApprovals: fixedCostMonetaryPendingApprovals,
-      limitations: fixedCostMonetaryLimitations,
+      limitations: trailer ? fixedCostTrailerMonetaryLimitations : fixedCostMonetaryLimitations,
     },
   };
 }

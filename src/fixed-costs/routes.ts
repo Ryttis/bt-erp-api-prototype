@@ -8,6 +8,7 @@ import { FixedCostMonetaryError, FixedCostMonetaryTruncated } from './monetary-r
 import { TruckFixedCostBreakdownUnavailable } from './breakdown-contract.js';
 import { runTruckFixedCostPilotBreakdown } from './pilot-breakdown.js';
 import { runTruckFixedCostPilotSummary, TruckFixedCostPilotRefused, type TruckFixedCostPilotRefusal } from './pilot-summary.js';
+import { parseTrailerFixedCostRequest, runTrailerFixedCostPilotBreakdown, runTrailerFixedCostPilotSummary } from './pilot-trailer.js';
 import { parseTruckFixedCostSummaryRequest } from './summary-contract.js';
 
 const invalidQuery = () => apiErrorBody(new ApiError(400, 'INVALID_QUERY', 'Invalid fixed-cost query'));
@@ -39,17 +40,19 @@ export async function registerFixedCostRoutes(app: FastifyInstance, options: Fix
   // Missing or partial options resolve to disabled, so an unwired pilot fails closed.
   const fixedCosts: AppConfig['fixedCosts'] = Object.freeze({
     truckSummaryPilotEnabled: options.fixedCosts?.truckSummaryPilotEnabled === true,
+    trailerPilotEnabled: options.fixedCosts?.trailerPilotEnabled === true,
   });
   for (const path of fixedCostEndpoints) {
     app.get<{ Querystring: Record<string, unknown> }>(`/expense-analytics/fixed-costs/${path}`, async (request, reply) => {
       try {
-        // truckId belongs to the summary and breakdown contracts; on dimensions it stays unknown.
-        const parsed = parseFixedCostRequest(request.query, { allowTruckId: path !== 'dimensions' });
+        // truckId and trailerId belong to the summary and breakdown contracts; on dimensions they stay unknown.
+        const selectors = path !== 'dimensions';
+        const parsed = parseFixedCostRequest(request.query, { allowTruckId: selectors, allowTrailerId: selectors });
         // The capability gate runs before any replica, repository, or analytics-gate
-        // work. Only the configured truck pilots can resolve as enabled.
-        const capability = resolveFixedCostCapability(path, parsed.allocationScope, fixedCosts, { truckId: parsed.truckId });
+        // work. Only the configured truck and trailer pilots can resolve as enabled.
+        const capability = resolveFixedCostCapability(path, parsed.allocationScope, fixedCosts, { truckId: parsed.truckId, trailerId: parsed.trailerId });
         if (!capability.enabled) return reply.code(422).send(semanticsUnverified());
-        return await truckPilot(app, request, reply, capability.mode);
+        return await pilot(app, request, reply, capability.mode);
       } catch (error) {
         if (error instanceof InvalidFixedCostQuery) return reply.code(400).send(invalidQuery());
         throw error;
@@ -58,21 +61,24 @@ export async function registerFixedCostRoutes(app: FastifyInstance, options: Fix
   }
 }
 
-async function truckPilot(
+async function pilot(
   app: FastifyInstance,
   request: FastifyRequest<{ Querystring: Record<string, unknown> }>,
   reply: FastifyReply,
-  mode: 'truck_summary_pilot' | 'truck_breakdown_pilot',
+  mode: 'truck_summary_pilot' | 'truck_breakdown_pilot' | 'trailer_summary_pilot' | 'trailer_breakdown_pilot',
 ) {
-  // Both pilots share one public request shape: allocationScope=truck, one month, optional truckId.
-  const pilotRequest = parseTruckFixedCostSummaryRequest(request.query);
-  const breakdown = mode === 'truck_breakdown_pilot';
+  const trailer = mode === 'trailer_summary_pilot' || mode === 'trailer_breakdown_pilot';
+  // The trailer pilots take exactly allocationScope=trailer, one trailerId and one month.
+  const trailerRequest = trailer ? parseTrailerFixedCostRequest(request.query) : undefined;
+  // Both truck pilots share one public request shape: allocationScope=truck, one month, optional truckId.
+  const pilotRequest = trailer ? undefined : parseTruckFixedCostSummaryRequest(request.query);
+  const breakdown = mode === 'truck_breakdown_pilot' || mode === 'trailer_breakdown_pilot';
   // Defence in depth: the resolver already requires a truckId for the breakdown.
-  if (breakdown && pilotRequest.truckId === undefined) return reply.code(422).send(semanticsUnverified());
+  if (breakdown && pilotRequest !== undefined && pilotRequest.truckId === undefined) return reply.code(422).send(semanticsUnverified());
 
   const startedAt = performance.now();
   const endpoint: FixedCostEndpoint = breakdown ? 'breakdown' : 'summary';
-  const operation = `fixed_cost.truck_${endpoint}_pilot`;
+  const operation = `fixed_cost.${trailer ? 'trailer' : 'truck'}_${endpoint}_pilot`;
   // Duration, outcome and safe counters only: no amount, task, truck, date or row.
   const telemetry = (outcome: 'success' | 'refused' | 'error' | 'timeout' | 'busy', extra: Record<string, unknown> = {}) => {
     const event = {
@@ -85,6 +91,17 @@ async function truckPilot(
   };
 
   try {
+    if (trailerRequest !== undefined) {
+      if (breakdown) {
+        const result = await runTrailerFixedCostPilotBreakdown(app.replica, app.analyticsGate, trailerRequest);
+        telemetry('success', { group_count: result.data.groups.length });
+        return result;
+      }
+      const result = await runTrailerFixedCostPilotSummary(app.replica, app.analyticsGate, trailerRequest);
+      telemetry('success', { total_task_count: result.data.totalTaskCount });
+      return result;
+    }
+    if (pilotRequest === undefined) return reply.code(422).send(semanticsUnverified());
     if (breakdown) {
       const result = await runTruckFixedCostPilotBreakdown(app.replica, app.analyticsGate, { ...pilotRequest, truckId: pilotRequest.truckId! });
       telemetry('success', { group_count: result.meta.pagination.groupCount });

@@ -17,7 +17,7 @@ test('configuration defaults and explicit overrides', () => {
     password: 'test-only-password', port: 3306, ssl: false, connectionLimit: 4,
   });
   assert.deepEqual(config.safety, { queryTimeoutMs: 30000, analyticsConcurrency: 3, analyticsQueueLimit: 6, analyticsQueueTimeoutMs: 1000, slowQueryMs: 1000, maxRequestUrlLength: 4096 });
-  assert.deepEqual(config.fixedCosts, { truckSummaryPilotEnabled: false });
+  assert.deepEqual(config.fixedCosts, { truckSummaryPilotEnabled: false, trailerPilotEnabled: false });
   const explicit = loadConfig({ ...environment, PORT: '8080', ERP_REPLICA_PORT: '3307', ERP_REPLICA_SSL: 'true', ERP_REPLICA_CONNECTION_LIMIT: '2' });
   assert.equal(explicit.port, 8080);
   assert.equal(explicit.replica.port, 3307);

@@ -9,6 +9,8 @@ export interface FixedCostRequest {
   dateTo?: string;
   /** Canonical ERP truck ID (`uzdaviniai.uzdavinio_masina`); summary endpoint only. */
   truckId?: number;
+  /** Canonical ERP trailer ID (`uzdaviniai.uzdavinio_priekaba`); trailer scope only. */
+  trailerId?: number;
 }
 
 export interface FixedCostCurrencyScope {
@@ -55,11 +57,18 @@ const dateRangeDays = (from: string, to: string) => (Date.parse(`${to}T00:00:00Z
 /**
  * Fixed-cost monetary requests deliberately expose no pagination, grouping,
  * dimensions, sorting, measures, or field selection yet. Their mappings are
- * financial semantics, not generic caller-selected columns. The only filter is an
- * optional single `truckId`, admitted only where the caller allows it.
+ * financial semantics, not generic caller-selected columns. The only filters are an
+ * optional single `truckId` and a single `trailerId`, admitted only where the caller
+ * allows them. `trailerId` is valid only with `allocationScope=trailer` and never
+ * together with `truckId`, so one request can never name both populations.
  */
-export function parseFixedCostRequest(input: Record<string, unknown>, options: { allowTruckId?: boolean } = {}): FixedCostRequest {
-  const parameters = new Set(['allocationScope', 'dateFrom', 'dateTo', ...(options.allowTruckId === true ? ['truckId'] : [])]);
+export function parseFixedCostRequest(
+  input: Record<string, unknown>, options: { allowTruckId?: boolean; allowTrailerId?: boolean } = {},
+): FixedCostRequest {
+  const parameters = new Set([
+    'allocationScope', 'dateFrom', 'dateTo',
+    ...(options.allowTruckId === true ? ['truckId'] : []), ...(options.allowTrailerId === true ? ['trailerId'] : []),
+  ]);
   for (const [key, value] of Object.entries(input)) {
     if (!parameters.has(key) || typeof value !== 'string') throw new InvalidFixedCostQuery();
   }
@@ -81,16 +90,21 @@ export function parseFixedCostRequest(input: Record<string, unknown>, options: {
   }
 
   // Canonical decimal digits only: no sign, leading zero, whitespace, exponent or fraction.
-  let truckId: number | undefined;
-  if (input.truckId !== undefined) {
-    if (typeof input.truckId !== 'string' || !/^[1-9][0-9]*$/.test(input.truckId)) throw new InvalidFixedCostQuery();
-    truckId = Number(input.truckId);
-    if (!Number.isSafeInteger(truckId)) throw new InvalidFixedCostQuery();
-  }
+  const identifier = (value: unknown): number | undefined => {
+    if (value === undefined) return undefined;
+    if (typeof value !== 'string' || !/^[1-9][0-9]*$/.test(value)) throw new InvalidFixedCostQuery();
+    const parsed = Number(value);
+    if (!Number.isSafeInteger(parsed)) throw new InvalidFixedCostQuery();
+    return parsed;
+  };
+  const truckId = identifier(input.truckId);
+  const trailerId = identifier(input.trailerId);
+  if (trailerId !== undefined && (allocationScope !== 'trailer' || truckId !== undefined)) throw new InvalidFixedCostQuery();
 
   return {
     allocationScope: allocationScope as FixedCostAllocationScope,
     ...(dateFrom === undefined ? {} : { dateFrom, dateTo: dateTo! }),
     ...(truckId === undefined ? {} : { truckId }),
+    ...(trailerId === undefined ? {} : { trailerId }),
   };
 }

@@ -1,4 +1,4 @@
-import type { FixedCostComponentAmounts } from './monetary-repository.js';
+import type { FixedCostComponentAmounts, FixedCostTrailerComponentAmounts } from './monetary-repository.js';
 import {
   fixedCostDifferenceBuckets, parseFixedCostReconciliationMonth,
   type FixedCostDifferenceBucket,
@@ -46,6 +46,20 @@ export const fixedCostBreakdownSources = {
   locked: 'kastai_fiksuoti_vilkikai_det_locked',
 } as const;
 
+/**
+ * Trailer counterparts (schema API, 2026-09-30): same summary table and task grain,
+ * amount columns `kastaiPriekabos` / `locked_kastaiPriekabos`, and their own detail
+ * tables. Truck and trailer sources are never read by the same statement.
+ */
+export const fixedCostTrailerBreakdownSources = {
+  current: 'kastai_fiksuoti_priekabos_det',
+  locked: 'kastai_fiksuoti_priekabos_det_locked',
+} as const;
+
+/** Allocation scopes with an implemented monetary statement. */
+export const fixedCostMonetaryScopes = ['truck', 'trailer'] as const;
+export type FixedCostMonetaryScope = typeof fixedCostMonetaryScopes[number];
+
 export type FixedCostRepresentation = keyof typeof fixedCostBreakdownSources;
 export const fixedCostRepresentations = Object.keys(fixedCostBreakdownSources) as FixedCostRepresentation[];
 
@@ -73,7 +87,7 @@ export class InvalidFixedCostMonetaryResult extends Error {
 }
 
 export interface FixedCostMonetaryQuery {
-  allocationScope: 'truck';
+  allocationScope: FixedCostMonetaryScope;
   representation: FixedCostRepresentation;
   /** Canonical settled month, validated by the Slice 4 month contract. */
   periodMonth: string;
@@ -81,6 +95,8 @@ export interface FixedCostMonetaryQuery {
   periodEnd: string;
   /** Optional bounded allowlist of numeric truck identifiers. */
   truckIds?: number[];
+  /** Exactly one numeric trailer identifier; required for, and only valid with, the trailer scope. */
+  trailerId?: number;
   /** Deterministic record bound; a truncated month never yields a monetary result. */
   limit: number;
   /** Also read per-component comparable sums. Internal flag, never request input. */
@@ -99,13 +115,28 @@ export function parseFixedCostMonetaryQuery(input: unknown, now?: Date): FixedCo
     || ![Object.prototype, null].includes(Object.getPrototypeOf(input))) {
     throw new InvalidFixedCostMonetaryQuery();
   }
-  const allowed = new Set(['allocationScope', 'representation', 'periodMonth', 'truckIds', 'limit', 'includeComponents']);
+  const allowed = new Set(['allocationScope', 'representation', 'periodMonth', 'truckIds', 'trailerId', 'limit', 'includeComponents']);
   for (const key of Reflect.ownKeys(input)) {
     if (typeof key !== 'string' || !allowed.has(key)) throw new InvalidFixedCostMonetaryQuery();
   }
   const source = input as Record<string, unknown>;
 
-  if (source.allocationScope !== 'truck') throw new InvalidFixedCostMonetaryQuery('Only the truck allocation scope is implemented');
+  const allocationScope = source.allocationScope;
+  if (allocationScope !== 'truck' && allocationScope !== 'trailer') {
+    throw new InvalidFixedCostMonetaryQuery('Only the truck and trailer allocation scopes are implemented');
+  }
+  // Selectors never cross scopes: a truck read cannot carry a trailer selector and
+  // a trailer read is always for exactly one trailer, never fleet-wide.
+  const trailerId = source.trailerId;
+  if (allocationScope === 'truck' && trailerId !== undefined) {
+    throw new InvalidFixedCostMonetaryQuery('A trailer identifier is not valid for the truck scope');
+  }
+  if (allocationScope === 'trailer') {
+    if (source.truckIds !== undefined) throw new InvalidFixedCostMonetaryQuery('Truck identifiers are not valid for the trailer scope');
+    if (typeof trailerId !== 'number' || !Number.isSafeInteger(trailerId) || trailerId <= 0) {
+      throw new InvalidFixedCostMonetaryQuery('The trailer scope requires one positive safe integer trailer identifier');
+    }
+  }
   const representation = source.representation;
   if (typeof representation !== 'string' || !(fixedCostRepresentations as string[]).includes(representation)) {
     throw new InvalidFixedCostMonetaryQuery('An explicit current or locked representation is required');
@@ -144,11 +175,12 @@ export function parseFixedCostMonetaryQuery(input: unknown, now?: Date): FixedCo
   }
 
   return {
-    allocationScope: 'truck',
+    allocationScope,
     representation: representation as FixedCostRepresentation,
     periodMonth: period.month,
     periodEnd: period.monthEnd,
     ...(truckIds === undefined ? {} : { truckIds }),
+    ...(allocationScope === 'trailer' ? { trailerId: trailerId as number } : {}),
     limit,
     ...(source.includeComponents === true ? { includeComponents: true as const } : {}),
   };
@@ -257,13 +289,13 @@ export interface FixedCostMonetaryGroup {
    * the same comparable records as `componentTotal`, so together they add up to
    * `componentTotal`, not to the authoritative total. Null without comparable records.
    */
-  components?: FixedCostComponentAmounts | null;
+  components?: FixedCostComponentAmounts | FixedCostTrailerComponentAmounts | null;
 }
 
 export interface FixedCostMonetaryResult {
   groups: FixedCostMonetaryGroup[];
   meta: {
-    allocationScope: 'truck';
+    allocationScope: FixedCostMonetaryScope;
     representation: FixedCostRepresentation;
     periodMonth: string;
     /**
@@ -274,7 +306,8 @@ export interface FixedCostMonetaryResult {
     dateBasis: 'kastai_data';
     currency: 'EUR';
     authoritativeSource: typeof fixedCostAuthoritativeSource;
-    breakdownSource: typeof fixedCostBreakdownSources[FixedCostRepresentation];
+    breakdownSource: typeof fixedCostBreakdownSources[FixedCostRepresentation]
+      | typeof fixedCostTrailerBreakdownSources[FixedCostRepresentation];
     /** Verified ERP component field identifiers; no business grouping is applied. */
     componentFields: readonly string[];
     classificationApplied: false;
@@ -288,6 +321,8 @@ export interface FixedCostMonetaryResult {
     missingTaskCount: number;
     /** True when a bounded truck allowlist was applied, which excludes orphan rows. */
     truckFilterApplied: boolean;
+    /** Present, and true, only on trailer reads: the single bound trailer filter was applied. */
+    trailerFilterApplied?: true;
     truncated: false;
     complete: boolean;
     deletedRowPolicy: FixedCostDeletedRowPolicy;
@@ -309,6 +344,20 @@ export const fixedCostMonetaryLimitations = [
   'A group with no comparable record reports null comparison fields, never 0.00, and is marked structurally_non_comparable.',
   'The reporting period is filtered on kastai_data for both representations; locked_kastaiVilkiko_data is lock-event metadata, never the period filter.',
   'Summary rows whose task is absent from uzdaviniai stay in the authoritative population and are counted by missingTaskCount. A truck filter cannot map them, so it excludes them deterministically.',
+  'No reconciliation against an official ERP report has been performed (FC-11).',
+  'No cost-group classification is applied and no classificationVersion exists.',
+  'kastai_fiksuoti_ataskaita has no index on kastai_data, so month-scoped access is not production-ready (FC-P17).',
+] as const;
+
+/** Trailer reads: the same rules, stated against the trailer columns and open questions. */
+export const fixedCostTrailerMonetaryLimitations = [
+  'Authoritative totals are read from the summary table and are never recomputed from components.',
+  'authoritativeTotal spans every in-scope record; componentTotal spans comparable records only. Compare componentTotal with comparableAuthoritativeTotal.',
+  'Records without exactly one matching detail row are counted but never bucketed and never given a fabricated zero component total.',
+  'A group with no comparable record reports null comparison fields, never 0.00, and is marked structurally_non_comparable.',
+  'The reporting period is filtered on kastai_data for both representations; locked_kastaiPriekabos_data is lock-event metadata, never the period filter.',
+  'The trailer population is the summary rows whose task trailer (uzdaviniai.uzdavinio_priekaba) equals the bound trailer identifier; that field choice is not ERP-confirmed (FC-09).',
+  'The 0000-00-00 unlocked sentinel is ERP-confirmed for the truck lock date only (FCB-05); it is applied to locked_kastaiPriekabos_data by structural analogy.',
   'No reconciliation against an official ERP report has been performed (FC-11).',
   'No cost-group classification is applied and no classificationVersion exists.',
   'kastai_fiksuoti_ataskaita has no index on kastai_data, so month-scoped access is not production-ready (FC-P17).',
