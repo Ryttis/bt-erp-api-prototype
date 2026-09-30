@@ -30,11 +30,15 @@ import { orderFixedCostLimitations } from './summary-contract.js';
  *   `kastai_data`;
  * - components from `kastai_fiksuoti_priekabos_det` / `..._det_locked`;
  * - population: exactly one trailer, `uzdaviniai.uzdavinio_priekaba = trailerId`,
- *   always a bound value. There is no fleet-wide or multi-trailer read.
+ *   always a bound value, and only when that identifier exists in `priekabos`. A
+ *   number that is not a trailer master id matches nothing and is refused as
+ *   `NO_DATA_FOR_PERIOD`. The fleet-wide read lives in `pilot-trailer-fleet.ts`.
  *
- * Verified from schema metadata only. Two points rest on structural analogy with
- * the truck scope and are not ERP-confirmed: the task-trailer field (FC-09) and the
- * `0000-00-00` unlocked sentinel on the trailer lock date (FCB-05 covers the truck).
+ * The task-trailer field is business-confirmed (FC-09, 2026-09-30): it is the
+ * trailer identity for locked historical trailer costs and is not changed after
+ * task close. One point still rests on structural analogy with the truck scope and
+ * is not ERP-confirmed: the `0000-00-00` unlocked sentinel on the trailer lock date
+ * (FCB-05 covers the truck).
  */
 
 export const trailerFixedCostPilotSemanticsVersion = 'trailer-fixed-cost-summary-pilot-v1' as const;
@@ -49,7 +53,7 @@ const sharedLimitations = [
   'Supports exactly one settled complete calendar month that starts at least six months before the current month.',
   'Zero and negative stored amounts are passed through unchanged; their treatment is unapproved (FC-13).',
   'Month filtering on kastai_data has no supporting index and scans the summary table; this is internal low-volume pilot behaviour and is not production-ready (FC-P17).',
-  'The trailer population is the summary rows whose task trailer (uzdaviniai.uzdavinio_priekaba) equals trailerId; ERP has not confirmed that field against uzd_pr_vaziavo (FC-09). Rows whose task is absent from uzdaviniai cannot be attributed to any trailer and are excluded (FC-P18).',
+  'The trailer population is the summary rows whose task trailer (uzdaviniai.uzdavinio_priekaba) equals trailerId, the business-confirmed trailer identity for locked historical costs (FC-09), and only when trailerId exists in the trailer master (priekabos). Rows whose task is absent from uzdaviniai cannot be attributed to any trailer and are excluded (FC-P18).',
   'Lock state uses the 0000-00-00 sentinel on locked_kastaiPriekabos_data by analogy with the ERP-confirmed truck rule (FCB-05); ERP has not confirmed it for trailers.',
 ];
 

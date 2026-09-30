@@ -25,9 +25,14 @@ export const fixedCostSemanticCapabilities: Readonly<Record<FixedCostAllocationS
 export const fixedCostEndpoints = ['summary', 'breakdown', 'dimensions'] as const;
 export type FixedCostEndpoint = typeof fixedCostEndpoints[number];
 
+export type FixedCostPilotMode =
+  | 'truck_summary_pilot' | 'truck_breakdown_pilot'
+  | 'trailer_summary_pilot' | 'trailer_breakdown_pilot'
+  | 'trailer_fleet_summary_pilot' | 'trailer_fleet_breakdown_pilot';
+
 export type FixedCostResolvedCapability =
   | { enabled: false }
-  | { enabled: true; mode: 'truck_summary_pilot' | 'truck_breakdown_pilot' | 'trailer_summary_pilot' | 'trailer_breakdown_pilot' };
+  | { enabled: true; mode: FixedCostPilotMode };
 
 /**
  * Deterministic capability resolution from validated application configuration.
@@ -38,9 +43,10 @@ export type FixedCostResolvedCapability =
  * disabled whatever the flag says. Beyond the parsed truck selector, request, model
  * or query input never reaches this function.
  *
- * The trailer scope has its own fail-closed flag and resolves only for exactly one
- * validated `trailerId`, on the summary and the breakdown. There is no fleet-wide
- * trailer capability, and neither flag can enable the other scope.
+ * The trailer scope has its own fail-closed flag and resolves on the summary and the
+ * breakdown only: for exactly one validated `trailerId`, or fleet-wide when no
+ * selector is present. A truck selector never resolves a trailer read, and neither
+ * flag can enable the other scope.
  */
 export function resolveFixedCostCapability(
   endpoint: FixedCostEndpoint,
@@ -49,9 +55,10 @@ export function resolveFixedCostCapability(
   selection: { truckId?: number; trailerId?: number } = {},
 ): FixedCostResolvedCapability {
   if (scope === 'trailer') {
-    if (config.trailerPilotEnabled !== true || selection.trailerId === undefined || selection.truckId !== undefined) return { enabled: false };
-    if (endpoint === 'summary') return { enabled: true, mode: 'trailer_summary_pilot' };
-    if (endpoint === 'breakdown') return { enabled: true, mode: 'trailer_breakdown_pilot' };
+    if (config.trailerPilotEnabled !== true || selection.truckId !== undefined) return { enabled: false };
+    const fleet = selection.trailerId === undefined;
+    if (endpoint === 'summary') return { enabled: true, mode: fleet ? 'trailer_fleet_summary_pilot' : 'trailer_summary_pilot' };
+    if (endpoint === 'breakdown') return { enabled: true, mode: fleet ? 'trailer_fleet_breakdown_pilot' : 'trailer_breakdown_pilot' };
     return { enabled: false };
   }
   if (scope !== 'truck' || config.truckSummaryPilotEnabled !== true) return { enabled: false };

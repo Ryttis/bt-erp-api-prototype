@@ -30,7 +30,7 @@ export interface AppConfig {
   fixedCosts: {
     /** Temporary MP-8 Slice 6P pilot: enables only the locked truck summary. */
     truckSummaryPilotEnabled: boolean;
-    /** Temporary MP-8 pilot: enables only the single-trailer summary and breakdown. */
+    /** Temporary MP-8 pilot: enables only the trailer summary and breakdown, single-trailer or fleet-wide. */
     trailerPilotEnabled?: boolean;
   };
 }
