@@ -356,7 +356,7 @@ export const fixedCostTrailerMonetaryLimitations = [
   'Records without exactly one matching detail row are counted but never bucketed and never given a fabricated zero component total.',
   'A group with no comparable record reports null comparison fields, never 0.00, and is marked structurally_non_comparable.',
   'The reporting period is filtered on kastai_data for both representations; locked_kastaiPriekabos_data is lock-event metadata, never the period filter.',
-  'The trailer population is the summary rows whose task trailer (uzdaviniai.uzdavinio_priekaba) equals the bound trailer identifier; that field choice is not ERP-confirmed (FC-09).',
+  'The trailer population is the summary rows whose task trailer (uzdaviniai.uzdavinio_priekaba) equals the bound trailer identifier and exists in the trailer master (priekabos); that field is the business-confirmed trailer identity for locked historical costs (FC-09).',
   'The 0000-00-00 unlocked sentinel is ERP-confirmed for the truck lock date only (FCB-05); it is applied to locked_kastaiPriekabos_data by structural analogy.',
   'No reconciliation against an official ERP report has been performed (FC-11).',
   'No cost-group classification is applied and no classificationVersion exists.',

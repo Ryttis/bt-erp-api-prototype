@@ -59,6 +59,7 @@ const scopeSources = {
     detailTables: fixedCostBreakdownSources,
     componentFields: fixedCostComponentFields as readonly string[],
     taskVehicleColumn: 'uzdavinio_masina',
+    masterFilter: '',
     lockComment: `-- ERP confirmed on 2026-09-23 (FCB-05) that '0000-00-00' marks an unlocked
       -- truck result. Any other unusable date stays 'unknown' rather than being
       -- guessed in either direction.`,
@@ -69,6 +70,10 @@ const scopeSources = {
     detailTables: fixedCostTrailerBreakdownSources,
     componentFields: fixedCostTrailerComponentFields as readonly string[],
     taskVehicleColumn: 'uzdavinio_priekaba',
+    // A trailer identifier is valid only when the trailer master has it. Without a
+    // priekabos row no summary row matches, so the read is empty and refuses as
+    // NO_DATA_FOR_PERIOD instead of presenting an unknown number as a trailer.
+    masterFilter: '\n        AND EXISTS (SELECT 1 FROM priekabos p WHERE p.id = t.uzdavinio_priekaba)',
     lockComment: `-- The '0000-00-00' unlocked sentinel is ERP-confirmed for the truck lock date
       -- (FCB-05) and applied to the trailer lock date by structural analogy. Any
       -- other unusable date stays 'unknown' rather than being guessed.`,
@@ -82,7 +87,7 @@ export const fixedCostComponentFieldsByScope = {
 const decimalText = (expression: string, alias: string) => `CAST(${expression} AS CHAR) AS ${alias}`;
 
 /** Strict calendar-date text; zero and partial-zero dates never classify as valid. */
-const validLockDate = (date: string) => `(CAST(${date} AS CHAR) REGEXP '^[1-9][0-9]{3}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$'
+export const validLockDate = (date: string) => `(CAST(${date} AS CHAR) REGEXP '^[1-9][0-9]{3}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$'
       AND CAST(RIGHT(CAST(${date} AS CHAR), 2) AS UNSIGNED) <= DAY(LAST_DAY(CONCAT(LEFT(CAST(${date} AS CHAR), 7), '-01'))))`;
 
 /**
@@ -130,7 +135,7 @@ function buildStatement(
   const componentSum = (alias: string) => source.componentFields.map(column => `${alias}.${column}`).join(' + ');
   const difference = 'ABS(r.authoritative - r.componentSum)';
   const truckFilter = truckPlaceholders > 0
-    ? `\n        AND t.${source.taskVehicleColumn} IN (${Array.from({ length: truckPlaceholders }, () => '?').join(', ')})`
+    ? `\n        AND t.${source.taskVehicleColumn} IN (${Array.from({ length: truckPlaceholders }, () => '?').join(', ')})${source.masterFilter}`
     : '';
   // Optional per-component reads. Column names come only from the static verified
   // list, and each sum covers the same comparable records as componentTotal.
@@ -214,7 +219,7 @@ export class FixedCostMonetaryTruncated extends Error {
   }
 }
 
-function counter(row: Record<string, unknown>, column: string): number {
+export function counter(row: Record<string, unknown>, column: string): number {
   const value = row[column];
   const parsed = typeof value === 'bigint' ? Number(value)
     : typeof value === 'number' ? value

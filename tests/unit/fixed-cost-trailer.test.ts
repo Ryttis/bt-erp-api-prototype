@@ -175,13 +175,15 @@ test('the trailer flag is false by default, strictly parsed, and independent of 
   }
 });
 
-test('the resolver enables trailer only for its own strict flag and exactly one trailerId', () => {
+test('the resolver enables trailer only for its own strict flag, for one trailerId or fleet-wide', () => {
   const on = { truckSummaryPilotEnabled: false, trailerPilotEnabled: true };
   assert.deepEqual(resolveFixedCostCapability('summary', 'trailer', on, { trailerId: 1 }), { enabled: true, mode: 'trailer_summary_pilot' });
   assert.deepEqual(resolveFixedCostCapability('breakdown', 'trailer', on, { trailerId: 1 }), { enabled: true, mode: 'trailer_breakdown_pilot' });
   assert.deepEqual(resolveFixedCostCapability('dimensions', 'trailer', on, { trailerId: 1 }), { enabled: false });
-  // No fleet-wide trailer capability, and a truck selector never resolves a trailer read.
-  assert.deepEqual(resolveFixedCostCapability('summary', 'trailer', on), { enabled: false });
+  // Without a selector the read is fleet-wide; a truck selector never resolves a trailer read.
+  assert.deepEqual(resolveFixedCostCapability('summary', 'trailer', on), { enabled: true, mode: 'trailer_fleet_summary_pilot' });
+  assert.deepEqual(resolveFixedCostCapability('breakdown', 'trailer', on), { enabled: true, mode: 'trailer_fleet_breakdown_pilot' });
+  assert.deepEqual(resolveFixedCostCapability('dimensions', 'trailer', on), { enabled: false });
   assert.deepEqual(resolveFixedCostCapability('summary', 'trailer', on, { truckId: 1 }), { enabled: false });
   assert.deepEqual(resolveFixedCostCapability('summary', 'trailer', on, { truckId: 1, trailerId: 1 }), { enabled: false });
   // The truck flag alone never enables trailer, and the trailer flag alone never enables truck.
@@ -229,7 +231,9 @@ test('valid trailerId returns a one-trailer locked summary from the trailer colu
     });
     const { limitations } = response.json().meta;
     assert.deepEqual(limitations, [...limitations].sort());
-    for (const pattern of [/FC-09/, /FCB-05/, /provisional internal pilot/i, /deleted = 1 are excluded/, /FC-11/]) {
+    assert.ok(!limitations.some((entry: string) => /not confirmed|has not confirmed that field|not ERP-confirmed/.test(entry) && /uzdavinio_priekaba/.test(entry)),
+      'Attribution by uzdavinio_priekaba is no longer reported as unconfirmed');
+    for (const pattern of [/business-confirmed trailer identity/, /FCB-05/, /provisional internal pilot/i, /deleted = 1 are excluded/, /FC-11/]) {
       assert.ok(limitations.some((entry: string) => pattern.test(entry)), String(pattern));
     }
 
@@ -413,10 +417,6 @@ test('a trailer request cannot return the truck population', async () => {
     assert.equal(truckSelector.statusCode, 422);
     assert.equal(truckSelector.json().error.code, 'SEMANTICS_UNVERIFIED');
     assert.equal((await app.inject(summaryUrl(`${trailerQuery}&truckId=12345`))).statusCode, 400);
-    // No fleet-wide trailer read exists.
-    const fleet = await app.inject(summaryUrl(`allocationScope=trailer&${period}`));
-    assert.equal(fleet.statusCode, 422);
-    assert.equal(fleet.json().error.code, 'SEMANTICS_UNVERIFIED');
     assert.equal(calls.length, 0);
   });
   // Internal query: the trailer scope requires its one identifier and rejects truck identifiers.

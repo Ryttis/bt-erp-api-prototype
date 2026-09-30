@@ -79,7 +79,7 @@ All joins below are structurally inferred and must be validated with bounded dat
 | Department detail → task | `kastai_fiksuoti_skyriaus_det.uzdavinys = uzdaviniai.id` | `[ ]` Validate |
 | Assigned truck → master | `uzdaviniai.uzdavinio_masina = masinos.id` | Bounded Slice 2 numeric join coverage measured; actual-truck mapping remains unverified |
 | Actual truck → master | Mapping not verified: `uzd_vilk_vaziavo` is `varchar(55)` whereas master `id` is `int(11)` | `[!]` Do not equate these fields or infer a registration-number mapping |
-| Assigned trailer → master | `uzdaviniai.uzdavinio_priekaba = priekabos.id` | `[ ]` Compare with actual-trailer field |
+| Assigned trailer → master | `uzdaviniai.uzdavinio_priekaba = priekabos.id` | Business-confirmed 2026-09-30 as the trailer identity for locked historical trailer costs (FC-09) |
 | Actual trailer → master | Text-to-master mapping not verified | `[!]` Do not equate the textual actual-trailer field with an integer master ID |
 | Truck → historical department | vehicle ID + cost date within `masinos_valdymas.data_nuo/data_iki` | `[ ]` Prove exactly one applicable row |
 | Truck → cost configuration | `masinos.tipas_kastu = kastaivilkikai.kastu_tipas` plus validity date | `[ ]` Validate selection and overlaps |
@@ -266,7 +266,7 @@ Production monetary aggregation for a scope may be enabled only when all boxes b
 | FC-06 | Do task summary totals reconcile to the sum of detail components? | ERP/Finance | Yes | Open, narrowed: section 16 measures every comparable task within 1.00 EUR across 24 months, with 56.68% within 0.01 EUR. Additivity holds at euro scale; the sub-euro residual rule is unapproved. |
 | FC-07 | Which component columns are independently additive? | ERP/Finance | Yes | Open: the full 15-component sum reproduces the stored total within 1.00 EUR for every comparable task. No subset was tried and none is proposed. |
 | FC-08 | Should truck reporting use `uzdavinio_masina` or `uzd_vilk_vaziavo`? | ERP/BA | Yes for truck grouping | Confirmed 2026-09-23 (FCB-08): `uzdavinio_masina`. |
-| FC-09 | Should trailer reporting use `uzdavinio_priekaba` or `uzd_pr_vaziavo`? | ERP/BA | Yes for trailer grouping | Open |
+| FC-09 | Should trailer reporting use `uzdavinio_priekaba` or `uzd_pr_vaziavo`? | ERP/BA | Yes for trailer grouping | Closed 2026-09-30: `uzdavinio_priekaba`; assignments do not change after task close |
 | FC-10 | How are tasks attributed when historical department intervals overlap or are missing? | ERP/BA | Yes for department grouping | Open |
 | FC-11 | Which ERP report and closed period will be used for reconciliation? | Finance | Yes | Open |
 | FC-12 | What do `uzdaviniai.kastaiVilkiko`, `kastai_fiksuoti_ataskaita.kastaiVilkiko` and `locked_kastaiVilkiko` each represent? | ERP/BA | Yes | Confirmed 2026-09-23 (FCB-03, FCB-04, FCB-05): component split, locked representation, and `0000-00-00` as not locked. |
@@ -1302,9 +1302,12 @@ Flag: `ERP_FIXED_COST_TRAILER_PILOT_ENABLED` (default `false`, independent of th
 
 Period, deleted-row, lock and completeness rules are the Slice 6P truck rules, reused unchanged. The truck statements are byte-identical to before (hash-pinned in `tests/unit/fixed-cost-trailer.test.ts`).
 
+FC-09 is **closed** (business confirmation, 2026-09-30): `uzdavinio_priekaba` is the trailer identity for locked historical trailer costs and is not changed after task close; `uzd_pr_vaziavo` is not used.
+
+A `trailerId` is valid only when it exists in `priekabos`: the single-trailer statement adds `EXISTS (SELECT 1 FROM priekabos p WHERE p.id = t.uzdavinio_priekaba)`, so a number that only appears on task rows matches nothing and is refused as 422 `NO_DATA_FOR_PERIOD`, consistent with the fleet category `invalidMasterId`.
+
 Not ERP-confirmed, applied by structural analogy and stated in the response limitations:
 
-- FC-09 stays **open**: `uzdavinio_priekaba` (assigned) versus `uzd_pr_vaziavo` (textual actual trailer).
 - The `0000-00-00` unlocked sentinel (FCB-05) is confirmed for the truck lock date only.
 
 Replica measurements, `deleted = 0`, aggregate counts only:
@@ -1319,4 +1322,38 @@ Replica measurements, `deleted = 0`, aggregate counts only:
 | `uzd_pr_vaziavo` differs from the assigned trailer's `masinos_nr` | 285 | 162 |
 | Trailer lock date unlocked / differs from truck lock date | 0 / 0 | 0 / 0 |
 
-Consequence: per-trailer amounts are internally consistent, but in 2025-03 some trailer cost sits on tasks with no assigned trailer ID, so single-trailer amounts must not be summed and presented as the fleet trailer total until FC-09 is answered.
+Consequence: per-trailer amounts are internally consistent, but in 2025-03 some trailer cost sits on tasks with no assigned trailer ID, so single-trailer amounts must not be summed and presented as the fleet trailer total; the fleet read (section 23) reports that cost as the explicit unattributed amount.
+
+## 23. Fleet-wide trailer pilot (2026-09-30)
+
+Same flag as section 22 (`ERP_FIXED_COST_TRAILER_PILOT_ENABLED`). A trailer request **without** `trailerId` is now the fleet-wide read, on `summary` and `breakdown`; `dimensions` and a `truckId` on the trailer scope stay 422. The truck statements are byte-identical to before and the single-trailer statements are pinned with their `priekabos` master check (hash-pinned in `tests/unit/fixed-cost-trailer-fleet.test.ts`).
+
+Business confirmation (2026-09-30): `uzdaviniai.uzdavinio_priekaba` is the trailer identity for historical locked trailer costs, and trailer assignments do not change after task close. The fleet read attributes by that numeric ID only; `uzd_pr_vaziavo` and registration text are never read.
+
+Request: `GET /expense-analytics/fixed-costs/{summary|breakdown}?allocationScope=trailer&dateFrom=YYYY-MM-01&dateTo=<last day>`. No grouping, sorting, paging or representation parameter exists.
+
+| Element | Rule |
+|---|---|
+| Population | `kastai_fiksuoti_ataskaita` rows of the cost month, `deleted = 0`, all locked (section 22 rules) |
+| Amount | stored `locked_kastaiPriekabos`; detail tables are not read |
+| Attributed | task exists, `uzdavinio_priekaba > 0`, and that ID exists in `priekabos` |
+| Unattributed | everything else, one category each: `missingTask`, `missingAssignment`, `invalidMasterId` |
+| Invariant | `amount = attributedAmount + unattributedAmount`, evaluated in SQL `DECIMAL`; a read where it fails is refused (`INCOMPLETE_RESULT`) |
+| Groups (`breakdown`) | one per attributed trailer, `ORDER BY SUM(amount) DESC, trailerId ASC` in SQL; hard ceiling 20,000 groups |
+
+Statements: `trailerFleetTotalsStatement` and `trailerFleetGroupsStatement` in `src/fixed-costs/trailer-fleet-repository.ts`, both module constants bound only by the two period values.
+
+Replica reconciliation (`tests/integration/fixed-cost-trailer-fleet.test.ts`, counts only):
+
+| Measure | 2025-03 | 2025-11 |
+|---|---|---|
+| Included tasks (all locked) | 20,795 | 21,766 |
+| Attributed tasks / trailers | 18,929 / 1,498 | 19,867 / 1,671 |
+| Unattributed tasks / non-zero | 1,866 / 809 | 1,899 / 0 |
+| Unattributed categories | all `missingAssignment` | all `missingAssignment` |
+| Endpoint total = direct source total | yes | yes |
+| attributed + unattributed = total | yes | yes |
+| Σ groups = attributed | yes | yes |
+| Single-trailer endpoint = fleet group (7 trailers each) | 7 / 7 | 7 / 7 |
+
+Still open: the trailer `0000-00-00` lock sentinel is applied by analogy with FCB-05; FC-03, FC-11, FC-13 and FC-P17 are unchanged.

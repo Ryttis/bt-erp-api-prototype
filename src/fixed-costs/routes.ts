@@ -1,13 +1,16 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { AppConfig } from '../config.js';
 import { ApiError, apiErrorBody } from '../errors.js';
-import { fixedCostEndpoints, resolveFixedCostCapability, type FixedCostEndpoint } from './capabilities.js';
+import { fixedCostEndpoints, resolveFixedCostCapability, type FixedCostEndpoint, type FixedCostPilotMode } from './capabilities.js';
 import { InvalidFixedCostQuery, parseFixedCostRequest } from './contracts.js';
 import { FixedCostDeletedPolicyUnapproved, InvalidFixedCostMonetaryQuery, InvalidFixedCostMonetaryResult } from './monetary-contract.js';
 import { FixedCostMonetaryError, FixedCostMonetaryTruncated } from './monetary-repository.js';
 import { TruckFixedCostBreakdownUnavailable } from './breakdown-contract.js';
 import { runTruckFixedCostPilotBreakdown } from './pilot-breakdown.js';
 import { runTruckFixedCostPilotSummary, TruckFixedCostPilotRefused, type TruckFixedCostPilotRefusal } from './pilot-summary.js';
+import {
+  parseTrailerFleetFixedCostRequest, runTrailerFleetFixedCostPilotBreakdown, runTrailerFleetFixedCostPilotSummary,
+} from './pilot-trailer-fleet.js';
 import { parseTrailerFixedCostRequest, runTrailerFixedCostPilotBreakdown, runTrailerFixedCostPilotSummary } from './pilot-trailer.js';
 import { parseTruckFixedCostSummaryRequest } from './summary-contract.js';
 
@@ -65,20 +68,23 @@ async function pilot(
   app: FastifyInstance,
   request: FastifyRequest<{ Querystring: Record<string, unknown> }>,
   reply: FastifyReply,
-  mode: 'truck_summary_pilot' | 'truck_breakdown_pilot' | 'trailer_summary_pilot' | 'trailer_breakdown_pilot',
+  mode: FixedCostPilotMode,
 ) {
+  const trailerFleet = mode === 'trailer_fleet_summary_pilot' || mode === 'trailer_fleet_breakdown_pilot';
   const trailer = mode === 'trailer_summary_pilot' || mode === 'trailer_breakdown_pilot';
+  // The fleet-wide trailer pilots take exactly allocationScope=trailer and one month, with no selector.
+  const trailerFleetRequest = trailerFleet ? parseTrailerFleetFixedCostRequest(request.query) : undefined;
   // The trailer pilots take exactly allocationScope=trailer, one trailerId and one month.
   const trailerRequest = trailer ? parseTrailerFixedCostRequest(request.query) : undefined;
   // Both truck pilots share one public request shape: allocationScope=truck, one month, optional truckId.
-  const pilotRequest = trailer ? undefined : parseTruckFixedCostSummaryRequest(request.query);
-  const breakdown = mode === 'truck_breakdown_pilot' || mode === 'trailer_breakdown_pilot';
+  const pilotRequest = trailer || trailerFleet ? undefined : parseTruckFixedCostSummaryRequest(request.query);
+  const breakdown = mode === 'truck_breakdown_pilot' || mode === 'trailer_breakdown_pilot' || mode === 'trailer_fleet_breakdown_pilot';
   // Defence in depth: the resolver already requires a truckId for the breakdown.
   if (breakdown && pilotRequest !== undefined && pilotRequest.truckId === undefined) return reply.code(422).send(semanticsUnverified());
 
   const startedAt = performance.now();
   const endpoint: FixedCostEndpoint = breakdown ? 'breakdown' : 'summary';
-  const operation = `fixed_cost.${trailer ? 'trailer' : 'truck'}_${endpoint}_pilot`;
+  const operation = `fixed_cost.${trailerFleet ? 'trailer_fleet' : trailer ? 'trailer' : 'truck'}_${endpoint}_pilot`;
   // Duration, outcome and safe counters only: no amount, task, truck, date or row.
   const telemetry = (outcome: 'success' | 'refused' | 'error' | 'timeout' | 'busy', extra: Record<string, unknown> = {}) => {
     const event = {
@@ -91,6 +97,16 @@ async function pilot(
   };
 
   try {
+    if (trailerFleetRequest !== undefined) {
+      if (breakdown) {
+        const result = await runTrailerFleetFixedCostPilotBreakdown(app.replica, app.analyticsGate, trailerFleetRequest);
+        telemetry('success', { group_count: result.meta.groupCount });
+        return result;
+      }
+      const result = await runTrailerFleetFixedCostPilotSummary(app.replica, app.analyticsGate, trailerFleetRequest);
+      telemetry('success', { total_task_count: result.data.totalTaskCount });
+      return result;
+    }
     if (trailerRequest !== undefined) {
       if (breakdown) {
         const result = await runTrailerFixedCostPilotBreakdown(app.replica, app.analyticsGate, trailerRequest);
