@@ -1286,3 +1286,37 @@ FC-02 current/locked public exposure policy; FC-03 approved deleted-row rule; FC
 ### Coding gate status after Slice 6P
 
 Unchanged: **closed** for production. Only the flag-gated internal pilot can return an amount.
+
+## 22. Single-trailer pilot (2026-09-30)
+
+Flag: `ERP_FIXED_COST_TRAILER_PILOT_ENABLED` (default `false`, independent of the truck flag). When `true`, only `allocationScope=trailer` with exactly one `trailerId` resolves, on `summary` and `breakdown`. No fleet-wide or multi-trailer read exists; `dimensions` stays 422.
+
+| Element | Confirmed schema fact (schema API, 2026-09-30) |
+|---|---|
+| Trailer master | `priekabos`, PK `id` |
+| Task → trailer | `uzdaviniai.uzdavinio_priekaba` (`int`, indexed, no declared FK) |
+| Authoritative total | `kastai_fiksuoti_ataskaita.kastaiPriekabos` / `locked_kastaiPriekabos`, lock date `locked_kastaiPriekabos_data`, period `kastai_data` |
+| Current detail | `kastai_fiksuoti_priekabos_det`, PK (`uzdavinys`, `kastai_data`) |
+| Locked detail | `kastai_fiksuoti_priekabos_det_locked`, PK (`uzdavinys`, `kastai_data`) |
+| Components | `amortizacija`, `remontas`, `padangos`, `draudimai`, `lizingas`, `user_fee`, `preparation`, `insurance_repair` |
+
+Period, deleted-row, lock and completeness rules are the Slice 6P truck rules, reused unchanged. The truck statements are byte-identical to before (hash-pinned in `tests/unit/fixed-cost-trailer.test.ts`).
+
+Not ERP-confirmed, applied by structural analogy and stated in the response limitations:
+
+- FC-09 stays **open**: `uzdavinio_priekaba` (assigned) versus `uzd_pr_vaziavo` (textual actual trailer).
+- The `0000-00-00` unlocked sentinel (FCB-05) is confirmed for the truck lock date only.
+
+Replica measurements, `deleted = 0`, aggregate counts only:
+
+| Measure | 2025-03 | 2025-11 |
+|---|---|---|
+| Included tasks | 20,795 | 21,766 |
+| Tasks with `uzdavinio_priekaba > 0` | 18,929 | 19,867 |
+| Of those, ID absent from `priekabos` | 0 | 0 |
+| Non-zero locked trailer cost but no trailer ID | 809 | 0 |
+| Trailer ID present, locked trailer cost zero | 431 | 419 |
+| `uzd_pr_vaziavo` differs from the assigned trailer's `masinos_nr` | 285 | 162 |
+| Trailer lock date unlocked / differs from truck lock date | 0 / 0 | 0 / 0 |
+
+Consequence: per-trailer amounts are internally consistent, but in 2025-03 some trailer cost sits on tasks with no assigned trailer ID, so single-trailer amounts must not be summed and presented as the fleet trailer total until FC-09 is answered.

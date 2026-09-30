@@ -30,6 +30,8 @@ export interface AppConfig {
   fixedCosts: {
     /** Temporary MP-8 Slice 6P pilot: enables only the locked truck summary. */
     truckSummaryPilotEnabled: boolean;
+    /** Temporary MP-8 pilot: enables only the single-trailer summary and breakdown. */
+    trailerPilotEnabled?: boolean;
   };
 }
 
@@ -81,6 +83,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     fixedCosts: {
       // Fail closed: absent means disabled, and anything but exact true/false is rejected.
       truckSummaryPilotEnabled: boolean('ERP_FIXED_COST_TRUCK_SUMMARY_PILOT_ENABLED'),
+      trailerPilotEnabled: boolean('ERP_FIXED_COST_TRAILER_PILOT_ENABLED'),
     },
   };
 }

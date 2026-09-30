@@ -3,7 +3,7 @@ import type { ReplicaPool } from '../db/replica.js';
 import { fixedCostBreakdownDefaultPageSize, type TruckFixedCostBreakdownResponse } from './breakdown-contract.js';
 import { buildTruckFixedCostBreakdown, type TruckBreakdownExecutor } from './breakdown-service.js';
 import { fixedCostMonetaryMaxRecords, InvalidFixedCostMonetaryResult } from './monetary-contract.js';
-import { queryFixedCostMonetaryTotals } from './monetary-repository.js';
+import { queryFixedCostMonetaryTotals, type FixedCostComponentAmounts } from './monetary-repository.js';
 import {
   pilotIncludedGroup, resolveTruckFixedCostPilotMonth, truckFixedCostPilotDeletedRowPolicy,
 } from './pilot-summary.js';
@@ -68,7 +68,8 @@ export async function runTruckFixedCostPilotBreakdown(
           noDetailRecords: group.noDetailRecords,
           multipleDetailRecords: group.multipleDetailRecords,
           // The repository returns components whenever includeComponents is set; absent means miswired.
-          components: group.components === undefined ? invalid() : group.components,
+          // pilotIncludedGroup proved a truck read, so these are the truck component fields.
+          components: group.components === undefined ? invalid() : group.components as FixedCostComponentAmounts | null,
         },
       }],
     };

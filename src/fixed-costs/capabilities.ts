@@ -27,7 +27,7 @@ export type FixedCostEndpoint = typeof fixedCostEndpoints[number];
 
 export type FixedCostResolvedCapability =
   | { enabled: false }
-  | { enabled: true; mode: 'truck_summary_pilot' | 'truck_breakdown_pilot' };
+  | { enabled: true; mode: 'truck_summary_pilot' | 'truck_breakdown_pilot' | 'trailer_summary_pilot' | 'trailer_breakdown_pilot' };
 
 /**
  * Deterministic capability resolution from validated application configuration.
@@ -37,13 +37,23 @@ export type FixedCostResolvedCapability =
  * validated `truckId`. Fleet-wide breakdown, dimensions and every other scope stay
  * disabled whatever the flag says. Beyond the parsed truck selector, request, model
  * or query input never reaches this function.
+ *
+ * The trailer scope has its own fail-closed flag and resolves only for exactly one
+ * validated `trailerId`, on the summary and the breakdown. There is no fleet-wide
+ * trailer capability, and neither flag can enable the other scope.
  */
 export function resolveFixedCostCapability(
   endpoint: FixedCostEndpoint,
   scope: FixedCostAllocationScope,
   config: AppConfig['fixedCosts'],
-  selection: { truckId?: number } = {},
+  selection: { truckId?: number; trailerId?: number } = {},
 ): FixedCostResolvedCapability {
+  if (scope === 'trailer') {
+    if (config.trailerPilotEnabled !== true || selection.trailerId === undefined || selection.truckId !== undefined) return { enabled: false };
+    if (endpoint === 'summary') return { enabled: true, mode: 'trailer_summary_pilot' };
+    if (endpoint === 'breakdown') return { enabled: true, mode: 'trailer_breakdown_pilot' };
+    return { enabled: false };
+  }
   if (scope !== 'truck' || config.truckSummaryPilotEnabled !== true) return { enabled: false };
   if (endpoint === 'summary') return { enabled: true, mode: 'truck_summary_pilot' };
   if (endpoint === 'breakdown' && selection.truckId !== undefined) return { enabled: true, mode: 'truck_breakdown_pilot' };

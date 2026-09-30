@@ -112,7 +112,7 @@ const lastDayOfMonth = (year: number, monthIndex: number) => new Date(Date.UTC(y
  * be answered: no partial month, inclusivity rule or multi-month span is accepted.
  * Settlement reuses the committed Slice 4 six-month rule.
  */
-export function resolveTruckFixedCostPilotMonth(request: TruckFixedCostSummaryRequest, now: Date = new Date()): string {
+export function resolveTruckFixedCostPilotMonth(request: Pick<TruckFixedCostSummaryRequest, 'dateFrom' | 'dateTo'>, now: Date = new Date()): string {
   const match = /^([0-9]{4})-([0-9]{2})-01$/.exec(request.dateFrom);
   if (!match) throw new TruckFixedCostPilotRefused('PERIOD_NOT_COMPLETE_MONTH');
   if (request.dateTo !== lastDayOfMonth(Number(match[1]), Number(match[2]) - 1)) {
@@ -159,6 +159,15 @@ export function pilotIncludedGroup(
     || meta.truckFilterApplied !== (truckId !== undefined)) {
     throw new InvalidFixedCostMonetaryResult('Repository result does not match the pilot read');
   }
+  return pilotIncludedPopulation(result);
+}
+
+/**
+ * The scope-independent population rules, applied after the caller has proven the
+ * read matches its own request. Shared unchanged by the truck and trailer pilots.
+ */
+export function pilotIncludedPopulation(result: FixedCostMonetaryResult): FixedCostMonetaryGroup {
+  const { meta } = result;
   if (meta.complete !== true || meta.truncated !== false) throw incomplete();
 
   // Only declared states are accepted. An undeclared `deleted` value is neither the
