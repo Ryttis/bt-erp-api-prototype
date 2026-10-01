@@ -526,6 +526,8 @@ test('public breakdown requests stay blocked with zero replica access', async ()
       for (const method of ['GET', 'POST'] as const) assert.equal((await app.inject({ method, url: path })).statusCode, 404, path);
     }
     assert.deepEqual([...routes].filter(path => path.includes('fixed-costs')).sort(), [
+      // MP-8 single-trailer month discovery; the only fixed-cost route added since.
+      '/expense-analytics/fixed-costs/available-periods',
       '/expense-analytics/fixed-costs/breakdown',
       '/expense-analytics/fixed-costs/dimensions',
       '/expense-analytics/fixed-costs/summary',

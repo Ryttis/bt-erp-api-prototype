@@ -499,6 +499,8 @@ test('existing vehicle, invoice and schema routes are still registered unchanged
     }
     assert.equal((await app.inject('/health')).statusCode, 200, '/health still registered');
     assert.deepEqual([...routes].filter(path => path.includes('fixed-costs')).sort(), [
+      // MP-8 single-trailer month discovery; the only fixed-cost route added since.
+      '/expense-analytics/fixed-costs/available-periods',
       '/expense-analytics/fixed-costs/breakdown',
       '/expense-analytics/fixed-costs/dimensions',
       '/expense-analytics/fixed-costs/summary',

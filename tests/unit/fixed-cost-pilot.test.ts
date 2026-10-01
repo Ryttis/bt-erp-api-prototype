@@ -636,6 +636,8 @@ test('the pilot adds no route and leaves existing routes identical', async () =>
   const enabled = await collect(enabledConfig);
   assert.deepEqual(enabled, await collect(disabledConfig));
   assert.deepEqual(enabled.filter(route => route.includes('fixed-costs')), [
+    // MP-8 single-trailer month discovery; the only fixed-cost route added since.
+    'GET /expense-analytics/fixed-costs/available-periods',
     'GET /expense-analytics/fixed-costs/breakdown',
     'GET /expense-analytics/fixed-costs/dimensions',
     'GET /expense-analytics/fixed-costs/summary',

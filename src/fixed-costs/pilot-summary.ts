@@ -169,11 +169,24 @@ export function pilotIncludedGroup(
 export function pilotIncludedPopulation(result: FixedCostMonetaryResult): FixedCostMonetaryGroup {
   const { meta } = result;
   if (meta.complete !== true || meta.truncated !== false) throw incomplete();
+  return pilotIncludedStateGroup(result.groups);
+}
 
+/** The declared-state counters the population rules read; nothing else in a group decides eligibility. */
+export type FixedCostPilotPopulationCounts = Pick<FixedCostMonetaryGroup,
+  'deletedState' | 'authoritativeRecords' | 'authoritativeTotal' | 'missingTotalRecords'
+  | 'lockedRecords' | 'unlockedRecords' | 'unknownLockRecords'>;
+
+/**
+ * The population rules over one complete, untruncated read's declared-state groups.
+ * Shared by the monthly reads above and by trailer available-period discovery, so a
+ * month is listed as available exactly when this function would accept its read.
+ */
+export function pilotIncludedStateGroup<G extends FixedCostPilotPopulationCounts>(groups: readonly G[]): G {
   // Only declared states are accepted. An undeclared `deleted` value is neither the
   // included nor the excluded population, so the included set cannot be proven.
-  if (result.groups.some(group => group.deletedState === 'other' && group.authoritativeRecords > 0)) throw incomplete();
-  const included = result.groups.filter(group => group.deletedState === 'zero');
+  if (groups.some(group => group.deletedState === 'other' && group.authoritativeRecords > 0)) throw incomplete();
+  const included = groups.filter(group => group.deletedState === 'zero');
   if (included.length > 1) throw incomplete();
   const [group] = included;
 

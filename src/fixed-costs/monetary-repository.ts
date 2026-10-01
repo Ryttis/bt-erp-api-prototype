@@ -51,7 +51,7 @@ export type FixedCostTrailerComponentAmounts = Readonly<Record<FixedCostTrailerC
  * Everything that differs between the truck and trailer statements. Static module
  * constants selected by the validated scope enum; no entry is ever caller text.
  */
-const scopeSources = {
+export const scopeSources = {
   truck: {
     // The authoritative amount column per representation. Read, never recomputed.
     authoritativeColumn: { current: 'kastaiVilkiko', locked: 'locked_kastaiVilkiko' },

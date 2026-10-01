@@ -1,7 +1,9 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { AppConfig } from '../config.js';
 import { ApiError, apiErrorBody } from '../errors.js';
-import { fixedCostEndpoints, resolveFixedCostCapability, type FixedCostEndpoint, type FixedCostPilotMode } from './capabilities.js';
+import {
+  fixedCostEndpoints, resolveFixedCostCapability, resolveTrailerAvailablePeriodsCapability, type FixedCostEndpoint, type FixedCostPilotMode,
+} from './capabilities.js';
 import { InvalidFixedCostQuery, parseFixedCostRequest } from './contracts.js';
 import { FixedCostDeletedPolicyUnapproved, InvalidFixedCostMonetaryQuery, InvalidFixedCostMonetaryResult } from './monetary-contract.js';
 import { FixedCostMonetaryError, FixedCostMonetaryTruncated } from './monetary-repository.js';
@@ -12,6 +14,7 @@ import {
   parseTrailerFleetFixedCostRequest, runTrailerFleetFixedCostPilotBreakdown, runTrailerFleetFixedCostPilotSummary,
 } from './pilot-trailer-fleet.js';
 import { parseTrailerFixedCostRequest, runTrailerFixedCostPilotBreakdown, runTrailerFixedCostPilotSummary } from './pilot-trailer.js';
+import { parseTrailerAvailablePeriodsRequest, runTrailerAvailablePeriods } from './pilot-trailer-available-periods.js';
 import { parseTruckFixedCostSummaryRequest } from './summary-contract.js';
 
 const invalidQuery = () => apiErrorBody(new ApiError(400, 'INVALID_QUERY', 'Invalid fixed-cost query'));
@@ -62,6 +65,27 @@ export async function registerFixedCostRoutes(app: FastifyInstance, options: Fix
       }
     });
   }
+
+  // Single-trailer month discovery. Its query contract is its own (a year, not a
+  // date range), so it is validated in full before the flag and any replica access.
+  app.get<{ Querystring: Record<string, unknown> }>('/expense-analytics/fixed-costs/available-periods', async (request, reply) => {
+    let availableRequest;
+    try {
+      availableRequest = parseTrailerAvailablePeriodsRequest(request.query);
+    } catch (error) {
+      if (error instanceof InvalidFixedCostQuery) return reply.code(400).send(invalidQuery());
+      throw error;
+    }
+    if (!resolveTrailerAvailablePeriodsCapability(fixedCosts)) return reply.code(422).send(semanticsUnverified());
+    const telemetry = pilotTelemetry(app, request, 'available-periods', 'fixed_cost.trailer_available_periods_pilot');
+    try {
+      const result = await runTrailerAvailablePeriods(app.replica, app.analyticsGate, availableRequest);
+      telemetry('success', { month_count: result.data.availableMonths.length });
+      return result;
+    } catch (error) {
+      return pilotFailure(error, reply, telemetry);
+    }
+  });
 }
 
 async function pilot(
@@ -82,19 +106,8 @@ async function pilot(
   // Defence in depth: the resolver already requires a truckId for the breakdown.
   if (breakdown && pilotRequest !== undefined && pilotRequest.truckId === undefined) return reply.code(422).send(semanticsUnverified());
 
-  const startedAt = performance.now();
   const endpoint: FixedCostEndpoint = breakdown ? 'breakdown' : 'summary';
-  const operation = `fixed_cost.${trailerFleet ? 'trailer_fleet' : trailer ? 'trailer' : 'truck'}_${endpoint}_pilot`;
-  // Duration, outcome and safe counters only: no amount, task, truck, date or row.
-  const telemetry = (outcome: 'success' | 'refused' | 'error' | 'timeout' | 'busy', extra: Record<string, unknown> = {}) => {
-    const event = {
-      request_id: request.id, endpoint: `/expense-analytics/fixed-costs/${endpoint}`, operation,
-      duration_ms: Number((performance.now() - startedAt).toFixed(2)), outcome,
-      timeout: outcome === 'timeout', busy: outcome === 'busy', ...extra,
-    };
-    if (outcome === 'success' && event.duration_ms < app.vehicleSafety.slowQueryMs) request.log.info(event, 'Fixed-cost pilot request');
-    else request.log.warn(event, outcome === 'success' ? 'Slow fixed-cost pilot request' : 'Fixed-cost pilot request refused or failed');
-  };
+  const telemetry = pilotTelemetry(app, request, endpoint, `fixed_cost.${trailerFleet ? 'trailer_fleet' : trailer ? 'trailer' : 'truck'}_${endpoint}_pilot`);
 
   try {
     if (trailerFleetRequest !== undefined) {
@@ -127,36 +140,59 @@ async function pilot(
     telemetry('success', { total_task_count: result.data.totalTaskCount });
     return result;
   } catch (error) {
-    if (error instanceof TruckFixedCostPilotRefused) {
-      telemetry('refused', { refusal: error.code });
-      return reply.code(422).send(apiErrorBody(new ApiError(422, error.code, pilotRefusalMessages[error.code])));
-    }
-    if (error instanceof FixedCostMonetaryTruncated || error instanceof InvalidFixedCostMonetaryResult || error instanceof TruckFixedCostBreakdownUnavailable) {
-      telemetry('refused', { refusal: 'INCOMPLETE_RESULT' });
-      return reply.code(422).send(apiErrorBody(new ApiError(422, 'INCOMPLETE_RESULT', pilotRefusalMessages.INCOMPLETE_RESULT)));
-    }
-    if (error instanceof ApiError) {
-      // Analytics-gate saturation, preserved unchanged by the repository.
-      telemetry('busy');
-      return reply.code(error.statusCode).send(apiErrorBody(error));
-    }
-    if (error instanceof FixedCostMonetaryError) {
-      // The shared timeout classifier also matches connection-acquisition timeouts.
-      // No statement ran in that case, so it is reported as unavailable, not as a
-      // query timeout. Only the classification is logged, never driver diagnostics.
-      const connectionFailure = error.diagnostics.some(entry => entry.code !== undefined && connectionFailureCodes.has(entry.code));
-      if (error.code === 'QUERY_TIMEOUT' && !connectionFailure) {
-        telemetry('timeout', { failure: 'statement_timeout' });
-        return reply.code(504).send(apiErrorBody(new ApiError(504, 'QUERY_TIMEOUT', 'Fixed-cost query timed out')));
-      }
-      telemetry('error', { failure: connectionFailure ? 'connection' : 'replica' });
-      return reply.code(503).send(apiErrorBody(new ApiError(503, 'REPLICA_UNAVAILABLE', 'Fixed-cost data temporarily unavailable')));
-    }
-    if (error instanceof FixedCostDeletedPolicyUnapproved || error instanceof InvalidFixedCostMonetaryQuery) {
-      // Internal pilot inputs are constants; reaching this means the pilot is miswired.
-      telemetry('error');
-      return reply.code(422).send(semanticsUnverified());
-    }
-    throw error;
+    return pilotFailure(error, reply, telemetry);
   }
+}
+
+type PilotTelemetry = (outcome: 'success' | 'refused' | 'error' | 'timeout' | 'busy', extra?: Record<string, unknown>) => void;
+
+function pilotTelemetry(
+  app: FastifyInstance, request: FastifyRequest, endpoint: string, operation: string,
+): PilotTelemetry {
+  const startedAt = performance.now();
+  // Duration, outcome and safe counters only: no amount, task, truck, date or row.
+  return (outcome, extra = {}) => {
+    const event = {
+      request_id: request.id, endpoint: `/expense-analytics/fixed-costs/${endpoint}`, operation,
+      duration_ms: Number((performance.now() - startedAt).toFixed(2)), outcome,
+      timeout: outcome === 'timeout', busy: outcome === 'busy', ...extra,
+    };
+    if (outcome === 'success' && event.duration_ms < app.vehicleSafety.slowQueryMs) request.log.info(event, 'Fixed-cost pilot request');
+    else request.log.warn(event, outcome === 'success' ? 'Slow fixed-cost pilot request' : 'Fixed-cost pilot request refused or failed');
+  };
+}
+
+/** Maps a pilot failure to its deterministic refusal; anything unrecognized is rethrown. */
+function pilotFailure(error: unknown, reply: FastifyReply, telemetry: PilotTelemetry) {
+  if (error instanceof TruckFixedCostPilotRefused) {
+    telemetry('refused', { refusal: error.code });
+    return reply.code(422).send(apiErrorBody(new ApiError(422, error.code, pilotRefusalMessages[error.code])));
+  }
+  if (error instanceof FixedCostMonetaryTruncated || error instanceof InvalidFixedCostMonetaryResult || error instanceof TruckFixedCostBreakdownUnavailable) {
+    telemetry('refused', { refusal: 'INCOMPLETE_RESULT' });
+    return reply.code(422).send(apiErrorBody(new ApiError(422, 'INCOMPLETE_RESULT', pilotRefusalMessages.INCOMPLETE_RESULT)));
+  }
+  if (error instanceof ApiError) {
+    // Analytics-gate saturation, preserved unchanged by the repository.
+    telemetry('busy');
+    return reply.code(error.statusCode).send(apiErrorBody(error));
+  }
+  if (error instanceof FixedCostMonetaryError) {
+    // The shared timeout classifier also matches connection-acquisition timeouts.
+    // No statement ran in that case, so it is reported as unavailable, not as a
+    // query timeout. Only the classification is logged, never driver diagnostics.
+    const connectionFailure = error.diagnostics.some(entry => entry.code !== undefined && connectionFailureCodes.has(entry.code));
+    if (error.code === 'QUERY_TIMEOUT' && !connectionFailure) {
+      telemetry('timeout', { failure: 'statement_timeout' });
+      return reply.code(504).send(apiErrorBody(new ApiError(504, 'QUERY_TIMEOUT', 'Fixed-cost query timed out')));
+    }
+    telemetry('error', { failure: connectionFailure ? 'connection' : 'replica' });
+    return reply.code(503).send(apiErrorBody(new ApiError(503, 'REPLICA_UNAVAILABLE', 'Fixed-cost data temporarily unavailable')));
+  }
+  if (error instanceof FixedCostDeletedPolicyUnapproved || error instanceof InvalidFixedCostMonetaryQuery) {
+    // Internal pilot inputs are constants; reaching this means the pilot is miswired.
+    telemetry('error');
+    return reply.code(422).send(semanticsUnverified());
+  }
+  throw error;
 }
