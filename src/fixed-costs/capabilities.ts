@@ -66,3 +66,11 @@ export function resolveFixedCostCapability(
   if (endpoint === 'breakdown' && selection.truckId !== undefined) return { enabled: true, mode: 'truck_breakdown_pilot' };
   return { enabled: false };
 }
+
+/**
+ * Single-trailer available-period discovery lists the months the single-trailer
+ * summary would answer, so it is enabled by exactly the same fail-closed trailer flag.
+ */
+export function resolveTrailerAvailablePeriodsCapability(config: AppConfig['fixedCosts']): boolean {
+  return config.trailerPilotEnabled === true;
+}
