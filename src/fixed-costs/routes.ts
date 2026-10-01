@@ -2,13 +2,15 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { AppConfig } from '../config.js';
 import { ApiError, apiErrorBody } from '../errors.js';
 import {
-  fixedCostEndpoints, resolveFixedCostCapability, resolveTrailerAvailablePeriodsCapability, type FixedCostEndpoint, type FixedCostPilotMode,
+  fixedCostEndpoints, resolveFixedCostCapability, resolveTrailerAvailablePeriodsCapability, resolveTruckComponentsCapability,
+  type FixedCostEndpoint, type FixedCostPilotMode,
 } from './capabilities.js';
 import { InvalidFixedCostQuery, parseFixedCostRequest } from './contracts.js';
 import { FixedCostDeletedPolicyUnapproved, InvalidFixedCostMonetaryQuery, InvalidFixedCostMonetaryResult } from './monetary-contract.js';
 import { FixedCostMonetaryError, FixedCostMonetaryTruncated } from './monetary-repository.js';
 import { TruckFixedCostBreakdownUnavailable } from './breakdown-contract.js';
 import { runTruckFixedCostPilotBreakdown } from './pilot-breakdown.js';
+import { parseTruckFixedCostComponentsRequest, runTruckFixedCostPilotComponents } from './pilot-components.js';
 import { runTruckFixedCostPilotSummary, TruckFixedCostPilotRefused, type TruckFixedCostPilotRefusal } from './pilot-summary.js';
 import {
   parseTrailerFleetFixedCostRequest, runTrailerFleetFixedCostPilotBreakdown, runTrailerFleetFixedCostPilotSummary,
@@ -81,6 +83,31 @@ export async function registerFixedCostRoutes(app: FastifyInstance, options: Fix
     try {
       const result = await runTrailerAvailablePeriods(app.replica, app.analyticsGate, availableRequest);
       telemetry('success', { month_count: result.data.availableMonths.length });
+      return result;
+    } catch (error) {
+      return pilotFailure(error, reply, telemetry);
+    }
+  });
+
+  // Fleet-wide truck component amounts for one month, optionally one exact component.
+  // Validated in full before the flag and any replica access; only the truck scope
+  // can resolve, under the truck pilot flag.
+  app.get<{ Querystring: Record<string, unknown> }>('/expense-analytics/fixed-costs/components', async (request, reply) => {
+    let componentsRequest;
+    try {
+      componentsRequest = parseTruckFixedCostComponentsRequest(request.query);
+    } catch (error) {
+      if (error instanceof InvalidFixedCostQuery) return reply.code(400).send(invalidQuery());
+      throw error;
+    }
+    const { allocationScope } = componentsRequest;
+    if (allocationScope !== 'truck' || !resolveTruckComponentsCapability(allocationScope, fixedCosts)) {
+      return reply.code(422).send(semanticsUnverified());
+    }
+    const telemetry = pilotTelemetry(app, request, 'components', 'fixed_cost.truck_components_pilot');
+    try {
+      const result = await runTruckFixedCostPilotComponents(app.replica, app.analyticsGate, { ...componentsRequest, allocationScope });
+      telemetry('success', { component_count: result.data.components.length, total_task_count: result.data.totalTaskCount });
       return result;
     } catch (error) {
       return pilotFailure(error, reply, telemetry);

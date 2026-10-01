@@ -469,7 +469,8 @@ test('a valid public truck summary request is still blocked with zero replica ac
       assert.equal(rejected.json().error.code, 'INVALID_QUERY');
     }
     // No summary, monetary, reconciliation or diagnostic HTTP path exists.
-    assert.ok([...routes].every(path => !/monetary|reconcil|diagnost|totals|component/i.test(path)));
+    // The truck components route (MP-8) is the one deliberate exception, gated by the truck pilot flag.
+    assert.ok([...routes].filter(path => path !== '/expense-analytics/fixed-costs/components').every(path => !/monetary|reconcil|diagnost|totals|component/i.test(path)));
     for (const path of [
       '/expense-analytics/fixed-costs/summary/truck', '/expense-analytics/fixed-costs/totals',
       '/expense-analytics/fixed-costs/monetary', '/expense-analytics/fixed-costs/reconciliation',
@@ -499,12 +500,13 @@ test('existing vehicle, invoice and schema routes are still registered unchanged
     }
     assert.equal((await app.inject('/health')).statusCode, 200, '/health still registered');
     assert.deepEqual([...routes].filter(path => path.includes('fixed-costs')).sort(), [
-      // MP-8 single-trailer month discovery; the only fixed-cost route added since.
+      // MP-8 single-trailer month discovery and truck component amounts; the only fixed-cost routes added since.
       '/expense-analytics/fixed-costs/available-periods',
       '/expense-analytics/fixed-costs/breakdown',
+      '/expense-analytics/fixed-costs/components',
       '/expense-analytics/fixed-costs/dimensions',
       '/expense-analytics/fixed-costs/summary',
-    ], 'No new fixed-cost route was added');
+    ], 'No other fixed-cost route was added');
   } finally { await app.close(); }
 });
 

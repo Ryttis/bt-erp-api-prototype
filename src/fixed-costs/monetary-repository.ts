@@ -6,7 +6,7 @@ import {
   fixedCostAuthoritativeSource, fixedCostBreakdownSources, fixedCostDeletedStates,
   fixedCostMonetaryLimitations, fixedCostMonetaryMaxRecords, fixedCostMonetaryPendingApprovals,
   fixedCostTrailerBreakdownSources, fixedCostTrailerMonetaryLimitations,
-  InvalidFixedCostMonetaryResult, parseFixedCostMonetaryQuery, unapprovedFixedCostDeletedRowPolicy,
+  InvalidFixedCostMonetaryQuery, InvalidFixedCostMonetaryResult, parseFixedCostMonetaryQuery, unapprovedFixedCostDeletedRowPolicy,
   type DecimalString, type FixedCostDeletedRowPolicy, type FixedCostDeletedState,
   type FixedCostMonetaryGroup, type FixedCostMonetaryQuery, type FixedCostMonetaryResult,
   type FixedCostMonetaryScope, type FixedCostRepresentation,
@@ -361,9 +361,15 @@ export async function queryFixedCostMonetaryTotals(
   const query = parseFixedCostMonetaryQuery(input, now);
   assertApprovedDeletedRowPolicy(policy);
 
-  const statement = fixedCostMonetaryStatement(query);
-  const trailer = query.allocationScope === 'trailer';
+  const rows = await executeMonetaryStatement(pool, gate, fixedCostMonetaryStatement(query), query);
   const source = scopeSources[query.allocationScope];
+  return monetaryResult(query, policy, rows.map(row => projectGroup(row, query.includeComponents === true ? source.componentFields : null)));
+}
+
+async function executeMonetaryStatement(
+  pool: ReplicaPool, gate: AnalyticsGate, statement: string, query: FixedCostMonetaryQuery,
+): Promise<Record<string, unknown>[]> {
+  const trailer = query.allocationScope === 'trailer';
   // Identifiers are only ever bound values, never statement text.
   const values: (string | number)[] = [query.periodMonth, query.periodEnd, ...(trailer ? [query.trailerId!] : query.truckIds ?? [])];
   let rows: Record<string, unknown>[];
@@ -375,9 +381,13 @@ export async function queryFixedCostMonetaryTotals(
     if (error instanceof ApiError) throw error;
     throw new FixedCostMonetaryError(error);
   }
-
   if (!Array.isArray(rows)) throw new InvalidFixedCostMonetaryResult('Unexpected driver result');
-  const groups = rows.map(row => projectGroup(row, query.includeComponents === true ? source.componentFields : null));
+  return rows;
+}
+
+function monetaryResult(query: FixedCostMonetaryQuery, policy: FixedCostDeletedRowPolicy, groups: FixedCostMonetaryGroup[]): FixedCostMonetaryResult {
+  const trailer = query.allocationScope === 'trailer';
+  const source = scopeSources[query.allocationScope];
   const recordsRead = groups.reduce((total, group) => total + group.authoritativeRecords, 0);
   if (new Set(groups.map(group => group.deletedState)).size !== groups.length) {
     throw new InvalidFixedCostMonetaryResult('Duplicate declared row state group');
@@ -412,6 +422,123 @@ export async function queryFixedCostMonetaryTotals(
       limitations: trailer ? fixedCostTrailerMonetaryLimitations : fixedCostMonetaryLimitations,
     },
   };
+}
+
+// Exact for every canonical decimal the statements emit (at most six fraction digits).
+const exactDecimal = (expression: string) => `CAST(${expression} AS DECIMAL(65,6))`;
+
+/**
+ * The component ranking statement: the unchanged monetary statement, with its
+ * per-component reads, as a derived table, crossed with the static component list
+ * so each declared-state group yields one row per component field.
+ *
+ * The month is scanned once. The database orders each state's rows in `DECIMAL` —
+ * amount descending, then the component key ascending in binary order — and also
+ * evaluates `componentsReconcile`: whether the per-component sums add up exactly to
+ * `componentTotal`. Component keys are module constants from the verified field
+ * list; the bound values are exactly those of the inner statement.
+ */
+export function fixedCostRankedComponentStatement(query: FixedCostMonetaryQuery): string {
+  const fields = scopeSources[query.allocationScope].componentFields;
+  const keys = fields.map((field, index) => index === 0 ? `SELECT '${field}' AS component` : `SELECT '${field}'`).join(' UNION ALL ');
+  const amount = `CASE k.component ${fields.map(field => `WHEN '${field}' THEN g.component_${field}`).join(' ')} END`;
+  return `SELECT g.*, k.component, ${amount} AS componentAmount,
+    CASE WHEN g.comparableRecords = 0 THEN NULL
+      WHEN ${exactDecimal('g.componentTotal')} = ${fields.map(field => exactDecimal(`g.component_${field}`)).join(' + ')} THEN 1
+      ELSE 0 END AS componentsReconcile
+  FROM (
+  ${fixedCostMonetaryStatement({ ...query, includeComponents: true })}
+  ) g
+  CROSS JOIN (${keys}) k
+  ORDER BY g.deletedState, ${exactDecimal(amount)} DESC, CAST(k.component AS BINARY) ASC`;
+}
+
+export interface FixedCostRankedComponent {
+  /** The exact ERP column name; no business label is applied. */
+  component: string;
+  amount: DecimalString;
+}
+
+export interface FixedCostRankedComponentGroup {
+  deletedState: FixedCostDeletedState;
+  /** Database order. Null exactly when the state has no comparable record. */
+  components: readonly FixedCostRankedComponent[] | null;
+  /** Database-evaluated: the per-component sums equal `componentTotal`. Null without comparable records. */
+  componentsReconcile: boolean | null;
+}
+
+export interface FixedCostRankedComponentResult {
+  totals: FixedCostMonetaryResult;
+  ranking: FixedCostRankedComponentGroup[];
+}
+
+/**
+ * Internal only. The monetary read plus a database-ordered component ranking per
+ * declared row state, from one statement. The same validation, policy gate, record
+ * bound and truncation rules as `queryFixedCostMonetaryTotals` apply, and `totals`
+ * has exactly its shape. Component amounts are compared only as text equality,
+ * never parsed, added or sorted in JavaScript.
+ */
+export async function queryFixedCostRankedComponents(
+  pool: ReplicaPool,
+  gate: AnalyticsGate,
+  input: unknown,
+  policy: FixedCostDeletedRowPolicy = unapprovedFixedCostDeletedRowPolicy,
+  now?: Date,
+): Promise<FixedCostRankedComponentResult> {
+  const query = parseFixedCostMonetaryQuery(input, now);
+  assertApprovedDeletedRowPolicy(policy);
+  if (query.includeComponents !== true) throw new InvalidFixedCostMonetaryQuery('The component ranking requires component reads');
+  const fields = scopeSources[query.allocationScope].componentFields;
+
+  const rows = await executeMonetaryStatement(pool, gate, fixedCostRankedComponentStatement(query), query);
+  const byState = new Map<unknown, Record<string, unknown>[]>();
+  for (const row of rows) {
+    if (row === null || typeof row !== 'object' || Array.isArray(row)) throw new InvalidFixedCostMonetaryResult('Unexpected driver row');
+    byState.set(row.deletedState, [...byState.get(row.deletedState) ?? [], row]);
+  }
+
+  const groups: FixedCostMonetaryGroup[] = [];
+  const ranking: FixedCostRankedComponentGroup[] = [];
+  for (const stateRows of byState.values()) {
+    if (stateRows.length !== fields.length) throw new InvalidFixedCostMonetaryResult('Component ranking does not cover every component field');
+    // Every row repeats its state's single aggregate; each must project identically.
+    const projected = stateRows.map(row => projectGroup(row, fields));
+    const [group] = projected;
+    const signature = JSON.stringify(group);
+    if (projected.some(entry => JSON.stringify(entry) !== signature)) {
+      throw new InvalidFixedCostMonetaryResult('Component ranking rows disagree on their group aggregate');
+    }
+
+    const seen = new Set<string>();
+    const ranked = stateRows.map(row => {
+      const component = row.component;
+      if (typeof component !== 'string' || !fields.includes(component) || seen.has(component)) {
+        throw new InvalidFixedCostMonetaryResult('Component ranking returned an unknown or duplicate component');
+      }
+      seen.add(component);
+      const amount = decimalOrNull(row, 'componentAmount');
+      const expected = group.components === null || group.components === undefined
+        ? null : (group.components as Record<string, DecimalString>)[component];
+      // The ranked amount must be the very same decimal text as the group's own component sum.
+      if (amount !== expected) throw new InvalidFixedCostMonetaryResult('Ranked component amount disagrees with its component sum');
+      return { component, amount };
+    });
+
+    const comparable = group.comparableRecords > 0;
+    const flags = stateRows.map(row => row.componentsReconcile === null || row.componentsReconcile === undefined
+      ? null : counter(row, 'componentsReconcile'));
+    if (flags.some(flag => flag !== flags[0]) || (comparable ? flags[0] !== 0 && flags[0] !== 1 : flags[0] !== null)) {
+      throw new InvalidFixedCostMonetaryResult('Invalid component reconciliation flag');
+    }
+    groups.push(group);
+    ranking.push({
+      deletedState: group.deletedState,
+      components: comparable ? Object.freeze(ranked as FixedCostRankedComponent[]) : null,
+      componentsReconcile: comparable ? flags[0] === 1 : null,
+    });
+  }
+  return { totals: monetaryResult(query, policy, groups), ranking };
 }
 
 export { fixedCostMonetaryMaxRecords };

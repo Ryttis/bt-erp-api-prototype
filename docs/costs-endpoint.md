@@ -1357,3 +1357,62 @@ Replica reconciliation (`tests/integration/fixed-cost-trailer-fleet.test.ts`, co
 | Single-trailer endpoint = fleet group (7 trailers each) | 7 / 7 | 7 / 7 |
 
 Still open: the trailer `0000-00-00` lock sentinel is applied by analogy with FCB-05; FC-03, FC-11, FC-13 and FC-P17 are unchanged.
+
+## 24. Truck fixed-cost components pilot (2026-10-01)
+
+Same flag as section 21 (`ERP_FIXED_COST_TRUCK_SUMMARY_PILOT_ENABLED`); the trailer flag never enables it. Answers "how much was spent on component X in month M" and "which components were largest in month M" fleet-wide for trucks, with all aggregation and ordering done by the database.
+
+Request: `GET /expense-analytics/fixed-costs/components?allocationScope=truck&dateFrom=YYYY-MM-01&dateTo=<last day>[&component=<key>]`. No `truckId`, `trailerId`, grouping, sorting, paging, representation or field parameter exists (400). A recognised non-truck scope is 422 `SEMANTICS_UNVERIFIED`; partial months and multi-month ranges are 422 `PERIOD_NOT_COMPLETE_MONTH`; unsettled months 422 `PERIOD_NOT_SETTLED`; an unknown or case-variant `component` is 400.
+
+API design: a sibling resource rather than `breakdown?groupBy=costComponent`, because the breakdown contract's groups are trucks and it deliberately rejects `groupBy`, sorting and paging. The Slice 7A `costComponent` grouping registry entry is unchanged (still blocked).
+
+| Element | Rule |
+|---|---|
+| Population | the section 21 summary population, decided by the same `pilotIncludedGroup`: locked representation, `deleted = 0`, every task locked, one settled complete month; refusals are identical |
+| `authoritativeAmount` | stored `locked_kastaiVilkiko` total of every included task — byte-identical to the summary's `amount`; never recomputed from components |
+| Component amount | `SUM` of one column of `kastai_fiksuoti_vilkikai_det_locked` over **comparable** tasks only (stored total present and exactly one locked detail row) — the existing per-component sums the single-truck breakdown reports as `reconciliation.locked.components` |
+| Ordering | in SQL: `ORDER BY CAST(amount AS DECIMAL(65,6)) DESC, CAST(component AS BINARY) ASC`; the response keeps driver order |
+| Invariant (refused when false) | Σ component amounts = `componentTotal`, evaluated in SQL `DECIMAL` |
+| Reported, never closed | `authoritativeAmount` vs `componentTotal` (no-detail tasks are in the first only), and the comparable sub-euro residual (`netDifference`, `grossAbsoluteDifference`, `affectedTaskCount`) |
+| Zero / negative | listed unchanged (FC-13); no comparable task at all is `INCOMPLETE_RESULT`, never zero-filled |
+
+One statement (`fixedCostRankedComponentStatement` in `src/fixed-costs/monetary-repository.ts`): the unchanged section 21 monetary statement with component reads as a derived table, crossed with the static key list. Bound values are the two period bounds only; `component` filtering is exact key selection after the read, so the single-component amount is the same text the full list carries.
+
+### Component key mapping
+
+API keys are the ERP column names verbatim. No business label, translation or grouping is applied; any mapping from business language (for example a BA asking about "tires") to a key is unapproved and must be confirmed by Finance/ERP.
+
+| API `component` | ERP field (`kastai_fiksuoti_vilkikai_det_locked.<field>`) |
+|---|---|
+| `CMRdraudimas` | `CMRdraudimas` |
+| `administracijaDU` | `administracijaDU` |
+| `amortizacija` | `amortizacija` |
+| `draudimai` | `draudimai` |
+| `draudiminiuRemontuDedamoji` | `draudiminiuRemontuDedamoji` |
+| `general_administrative_expenses` | `general_administrative_expenses` |
+| `kitiMokesciai` | `kitiMokesciai` |
+| `lizingas` | `lizingas` |
+| `padangos` | `padangos` |
+| `papildomosIslaidos` | `papildomosIslaidos` |
+| `remontas` | `remontas` |
+| `ruosimasGrazinimui` | `ruosimasGrazinimui` |
+| `vairuotojoTelefonas` | `vairuotojoTelefonas` |
+| `vairuotojuDU` | `vairuotojuDU` |
+| `vairuotojuDUPL` | `vairuotojuDUPL` |
+
+### Replica evidence (`tests/integration/fixed-cost-components.test.ts`, counts only)
+
+| Measure | 2024-12 | 2025-03 | 2025-12 |
+|---|---|---|---|
+| Included tasks / comparable / no detail / multiple detail | 18,734 / 18,296 / 438 / 0 | 20,795 / 20,468 / 327 / 0 | 21,365 / 20,804 / 561 / 0 |
+| Comparable tasks with a non-zero residual | 8,153 | 9,579 | 9,637 |
+| `authoritativeAmount` = summary `amount` | yes | yes | yes |
+| Each component = independent direct column sum | yes | yes | yes |
+| Order re-verified by the database | yes | yes | yes |
+| Non-zero / negative components | 13 / 0 | 15 / 0 | 15 / 0 |
+| `authoritativeAmount` = `componentTotal` | no | no | no |
+| Request duration | ~3.9 s | ~4.3 s | ~4.5 s |
+
+`EXPLAIN`: one index walk of `kastai_fiksuoti_ataskaita` (~1.49 M rows, FC-P17 unchanged) materialised once, then primary-key lookups into the locked detail table per component. The fifteen per-component lookups roughly double the summary's ~2 s; it remains internal low-volume pilot behaviour.
+
+Still open: FC-06/FC-07 (component additivity and the residual rule), business labels for the keys, FC-03, FC-11, FC-13, FC-P17.

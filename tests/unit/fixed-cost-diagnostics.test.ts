@@ -271,7 +271,8 @@ test('diagnostics add no HTTP surface and all Slice 1 monetary capabilities rema
     await app.ready();
     assert.deepEqual([...routes].filter(path => path.includes('fixed-costs')).sort(), [
       '/expense-analytics/fixed-costs/available-periods',
-      '/expense-analytics/fixed-costs/breakdown', '/expense-analytics/fixed-costs/dimensions', '/expense-analytics/fixed-costs/summary',
+      '/expense-analytics/fixed-costs/breakdown', '/expense-analytics/fixed-costs/components',
+      '/expense-analytics/fixed-costs/dimensions', '/expense-analytics/fixed-costs/summary',
     ]);
     assert.ok([...routes].every(path => !/diagnostic/i.test(path)));
     for (const [scope, capability] of Object.entries(fixedCostSemanticCapabilities)) {
