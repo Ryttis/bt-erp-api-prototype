@@ -3,11 +3,12 @@ import type { ReplicaPool } from '../db/replica.js';
 import { InvalidFixedCostQuery, parseFixedCostRequest, type FixedCostAllocationScope } from './contracts.js';
 import {
   fixedCostAuthoritativeSource, fixedCostBreakdownSources, fixedCostMonetaryMaxRecords, InvalidFixedCostMonetaryResult,
-  type DecimalString, type FixedCostMonetaryResult,
+  type DecimalString, type FixedCostMonetaryGroup, type FixedCostMonetaryResult,
 } from './monetary-contract.js';
 import {
-  fixedCostComponentFields, queryFixedCostRankedComponents,
-  type FixedCostComponentField, type FixedCostRankedComponent, type FixedCostRankedComponentGroup,
+  fixedCostComponentFields, fixedCostTrailerComponentFields, queryFixedCostRankedComponents,
+  type FixedCostComponentField, type FixedCostRankedComponent,
+  type FixedCostRankedComponentGroup, type FixedCostTrailerComponentField,
 } from './monetary-repository.js';
 import {
   pilotIncludedGroup, resolveTruckFixedCostPilotMonth, truckFixedCostPilotDeletedRowPolicy,
@@ -52,32 +53,40 @@ export const truckFixedCostComponentsLimitations = orderFixedCostLimitations([
   'Components are ordered by the database in DECIMAL by amount descending, then by component key ascending in binary order; zero and negative component amounts are listed unchanged.',
 ]);
 
-export interface TruckFixedCostComponentsRequest {
-  /** Any recognised scope; the route enables only `truck`. */
+export interface FixedCostComponentsRequest<K extends string = FixedCostComponentField | FixedCostTrailerComponentField> {
+  /** Any recognised scope; the route enables only `truck` and `trailer`. */
   allocationScope: FixedCostAllocationScope;
   dateFrom: string;
   dateTo: string;
-  /** One exact component key; absent means every component. */
-  component?: FixedCostComponentField;
+  /** One exact component key of the requested scope; absent means every component. */
+  component?: K;
 }
+
+export type TruckFixedCostComponentsRequest = FixedCostComponentsRequest<FixedCostComponentField>;
 
 /**
  * Exactly `allocationScope`, a paired date range and an optional `component`. No
  * selector, grouping, sorting, paging, representation or field input exists; an
  * unknown, repeated or case-variant component key is rejected.
+ *
+ * The key must belong to the requested scope's own verified column list: a truck
+ * key on the trailer scope, or a trailer key on the truck scope, is rejected. Scopes
+ * without a component source keep the truck list and are then refused by the route.
  */
-export function parseTruckFixedCostComponentsRequest(input: Record<string, unknown>): TruckFixedCostComponentsRequest {
+export function parseFixedCostComponentsRequest(input: Record<string, unknown>): FixedCostComponentsRequest {
   const { component, ...rest } = input;
   const parsed = parseFixedCostRequest(rest);
   if (parsed.dateFrom === undefined || parsed.dateTo === undefined) throw new InvalidFixedCostQuery();
-  if (component !== undefined && (typeof component !== 'string' || !(fixedCostComponentFields as readonly string[]).includes(component))) {
-    throw new InvalidFixedCostQuery();
-  }
+  const keys: readonly string[] = parsed.allocationScope === 'trailer' ? fixedCostTrailerComponentFields : fixedCostComponentFields;
+  if (component !== undefined && (typeof component !== 'string' || !keys.includes(component))) throw new InvalidFixedCostQuery();
   return {
     allocationScope: parsed.allocationScope, dateFrom: parsed.dateFrom, dateTo: parsed.dateTo,
-    ...(component === undefined ? {} : { component: component as FixedCostComponentField }),
+    ...(component === undefined ? {} : { component: component as FixedCostComponentField | FixedCostTrailerComponentField }),
   };
 }
+
+/** The truck-only name of `parseFixedCostComponentsRequest`, kept for existing callers. */
+export const parseTruckFixedCostComponentsRequest = parseFixedCostComponentsRequest;
 
 export interface TruckFixedCostPilotComponentsResponse {
   data: {
@@ -129,6 +138,32 @@ export interface TruckFixedCostPilotComponentsResponse {
 const incomplete = () => new TruckFixedCostPilotRefused('INCOMPLETE_RESULT');
 
 /**
+ * The included population's database-ordered components, optionally narrowed to one
+ * exact key. Shared by the truck and trailer component pilots; the caller has already
+ * proven the read matches its scope and applied the population rules to `group`.
+ */
+export function selectIncludedRankedComponents(
+  group: Pick<FixedCostMonetaryGroup, 'comparableRecords'>,
+  ranking: readonly FixedCostRankedComponentGroup[],
+  fields: readonly string[],
+  component?: string,
+): readonly FixedCostRankedComponent[] {
+  const ranked = ranking.filter(entry => entry.deletedState === 'zero');
+  if (ranked.length !== 1) throw new InvalidFixedCostMonetaryResult('The included population has no single component ranking');
+  const [{ components, componentsReconcile }] = ranked;
+  // Without a comparable task no component amount exists. That is not a zero.
+  if (group.comparableRecords === 0 || components === null) throw incomplete();
+  // Per-component sums that do not add up to their own total are a broken read, not a residual.
+  if (componentsReconcile !== true) throw incomplete();
+  if (components.length !== fields.length) throw incomplete();
+
+  // Exact key selection, never arithmetic: the single amount is the same text the full list carries.
+  const selected = component === undefined ? components : components.filter(entry => entry.component === component);
+  if (component !== undefined && selected.length !== 1) throw incomplete();
+  return Object.freeze(selected.map(entry => ({ component: entry.component, amount: entry.amount })));
+}
+
+/**
  * Applies the pilot rules to one ranked read. Exported for mutation tests; the route
  * always reaches it through `runTruckFixedCostPilotComponents`.
  */
@@ -143,18 +178,7 @@ export function projectTruckFixedCostPilotComponents(
   if (totals.meta.breakdownSource !== fixedCostBreakdownSources.locked) {
     throw new InvalidFixedCostMonetaryResult('Components were not read from the locked detail table');
   }
-  const ranked = ranking.filter(entry => entry.deletedState === 'zero');
-  if (ranked.length !== 1) throw new InvalidFixedCostMonetaryResult('The included population has no single component ranking');
-  const [{ components, componentsReconcile }] = ranked;
-  // Without a comparable task no component amount exists. That is not a zero.
-  if (group.comparableRecords === 0 || components === null) throw incomplete();
-  // Per-component sums that do not add up to their own total are a broken read, not a residual.
-  if (componentsReconcile !== true) throw incomplete();
-  if (components.length !== fixedCostComponentFields.length) throw incomplete();
-
-  // Exact key selection, never arithmetic: the single amount is the same text the full list carries.
-  const selected = component === undefined ? components : components.filter(entry => entry.component === component);
-  if (component !== undefined && selected.length !== 1) throw incomplete();
+  const selected = selectIncludedRankedComponents(group, ranking, fixedCostComponentFields, component);
 
   return {
     data: {
@@ -162,7 +186,7 @@ export function projectTruckFixedCostPilotComponents(
       periodMonth,
       currency: 'EUR',
       representation: 'locked',
-      components: Object.freeze(selected.map(entry => ({ component: entry.component, amount: entry.amount }))),
+      components: selected,
       authoritativeAmount: group.authoritativeTotal!,
       totalTaskCount: group.authoritativeRecords,
       lockedTaskCount: group.lockedRecords,
