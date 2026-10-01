@@ -77,6 +77,16 @@ export function resolveTruckComponentsCapability(scope: FixedCostAllocationScope
 }
 
 /**
+ * Fleet-wide trailer component amounts reuse the fleet-wide trailer summary pilot's
+ * population, period and lock rules, so they are enabled by exactly the same
+ * fail-closed trailer flag, and for the trailer scope only. The truck flag never
+ * enables them, and the trailer flag never enables the truck components.
+ */
+export function resolveTrailerComponentsCapability(scope: FixedCostAllocationScope, config: AppConfig['fixedCosts']): boolean {
+  return scope === 'trailer' && config.trailerPilotEnabled === true;
+}
+
+/**
  * Single-trailer available-period discovery lists the months the single-trailer
  * summary would answer, so it is enabled by exactly the same fail-closed trailer flag.
  */

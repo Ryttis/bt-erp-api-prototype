@@ -1416,3 +1416,50 @@ API keys are the ERP column names verbatim. No business label, translation or gr
 `EXPLAIN`: one index walk of `kastai_fiksuoti_ataskaita` (~1.49 M rows, FC-P17 unchanged) materialised once, then primary-key lookups into the locked detail table per component. The fifteen per-component lookups roughly double the summary's ~2 s; it remains internal low-volume pilot behaviour.
 
 Still open: FC-06/FC-07 (component additivity and the residual rule), business labels for the keys, FC-03, FC-11, FC-13, FC-P17.
+
+## 25. Trailer fixed-cost components pilot (2026-10-01)
+
+Same flag as the trailer pilots (`ERP_FIXED_COST_TRAILER_PILOT_ENABLED`); the truck flag never enables it, and the trailer flag never enables the truck components. Answers "how much was spent on trailer component X in month M" fleet-wide (e.g. "Kiek išleidome priekabų padangoms 2025-12?"), with all aggregation and ordering done by the database.
+
+Request: the section 24 resource with `allocationScope=trailer`: `GET /expense-analytics/fixed-costs/components?allocationScope=trailer&dateFrom=YYYY-MM-01&dateTo=<last day>[&component=<key>]`. One contract serves both scopes; `component` is validated against the requested scope's own key list, so a truck-only key on the trailer scope (and a trailer-only key on the truck scope) is 400. `trailerId`, `truckId`, grouping, ranking, sorting, paging and representation parameters are 400; partial months and ranges 422 `PERIOD_NOT_COMPLETE_MONTH`; unsettled months 422 `PERIOD_NOT_SETTLED`. The response has the section 24 shape with `allocationScope: "trailer"`, `meta.sourceFamily: "trailer_fixed_costs"`, `meta.componentSource: "kastai_fiksuoti_priekabos_det_locked"` and `meta.semanticsVersion: "trailer-fleet-fixed-cost-components-pilot-v1"`.
+
+| Element | Rule |
+|---|---|
+| Population | the section 23 fleet-wide trailer summary population: every `kastai_fiksuoti_ataskaita` row of the month, `deleted = 0`, every task locked (trailer `0000-00-00` sentinel by analogy with FCB-05), one settled complete month; rows without an attributable trailer stay in it; refusals are the summary's |
+| `authoritativeAmount` | stored `locked_kastaiPriekabos` total of every included task — equal to the fleet trailer summary's `amount`; never recomputed from components |
+| Component amount | `SUM` of one column of `kastai_fiksuoti_priekabos_det_locked` (the single-trailer breakdown's locked detail source) over **comparable** tasks only (stored total present and exactly one locked detail row) |
+| Ordering / invariant / gap | as section 24: SQL `DECIMAL` amount DESC, key ASC (binary); Σ components = `componentTotal` proven in SQL or refused; the gap to `authoritativeAmount` is reported, never closed |
+
+Statement: the shared section 24 ranked wrapper around the shared monetary statement built for the trailer scope **without** the single-trailer predicate and master check (`trailerFleetComponentsQuery` in `src/fixed-costs/monetary-repository.ts`). That query is constructed internally, never parsed, so `parseFixedCostMonetaryQuery` still requires exactly one `trailerId` and the single-trailer and truck statements are byte-identical to before. Bound values are the two period bounds only.
+
+### Component key mapping
+
+| API `component` | ERP field (`kastai_fiksuoti_priekabos_det_locked.<field>`) |
+|---|---|
+| `amortizacija` | `amortizacija` |
+| `draudimai` | `draudimai` |
+| `insurance_repair` | `insurance_repair` |
+| `lizingas` | `lizingas` |
+| `padangos` | `padangos` |
+| `preparation` | `preparation` |
+| `remontas` | `remontas` |
+| `user_fee` | `user_fee` |
+
+Keys are the ERP column names verbatim; no label, translation or grouping is applied or approved.
+
+### Replica evidence (`tests/integration/fixed-cost-trailer-components.test.ts`, counts only)
+
+| Measure | 2025-03 | 2025-12 |
+|---|---|---|
+| Included tasks / comparable / no detail / multiple detail | 20,795 / 19,307 / 1,488 / 0 | 21,365 / 18,899 / 2,466 / 0 |
+| Comparable tasks with a non-zero residual | 8,629 | 8,257 |
+| `authoritativeAmount` = fleet summary `amount` = direct stored sum | yes | yes |
+| Each component = independent direct column sum | yes | yes |
+| Order re-verified by the database | yes | yes |
+| Non-zero / negative components | 8 / 0 | 8 / 0 |
+| `authoritativeAmount` = `componentTotal` | no | no |
+| Request duration | ~2.8 s | ~3.7 s |
+
+`EXPLAIN`: one index walk of `kastai_fiksuoti_ataskaita` (~1.49 M rows, FC-P17 unchanged), then primary-key (`uzdavinys` prefix) lookups into `kastai_fiksuoti_priekabos_det_locked` (~1.39 M rows) per component.
+
+Still open: FC-06/FC-07 (additivity and residual rule), the large no-detail share (11.5% of 2025-12 tasks carry a stored trailer total but no locked trailer detail row, so their cost is in `authoritativeAmount` but in no component), business labels for the keys, the trailer lock sentinel, FC-03, FC-11, FC-13, FC-P17.

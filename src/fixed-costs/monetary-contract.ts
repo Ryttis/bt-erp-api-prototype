@@ -321,8 +321,11 @@ export interface FixedCostMonetaryResult {
     missingTaskCount: number;
     /** True when a bounded truck allowlist was applied, which excludes orphan rows. */
     truckFilterApplied: boolean;
-    /** Present, and true, only on trailer reads: the single bound trailer filter was applied. */
-    trailerFilterApplied?: true;
+    /**
+     * Present only on trailer reads: true when the single bound trailer filter was
+     * applied, false only on the internal fleet-wide trailer component read.
+     */
+    trailerFilterApplied?: boolean;
     truncated: false;
     complete: boolean;
     deletedRowPolicy: FixedCostDeletedRowPolicy;
@@ -361,6 +364,12 @@ export const fixedCostTrailerMonetaryLimitations = [
   'No reconciliation against an official ERP report has been performed (FC-11).',
   'No cost-group classification is applied and no classificationVersion exists.',
   'kastai_fiksuoti_ataskaita has no index on kastai_data, so month-scoped access is not production-ready (FC-P17).',
+] as const;
+
+/** The internal fleet-wide trailer component read: the trailer rules over every summary row of the month. */
+export const fixedCostTrailerFleetMonetaryLimitations = [
+  ...fixedCostTrailerMonetaryLimitations.filter(entry => !entry.startsWith('The trailer population is')),
+  'The fleet-wide trailer population is every summary row of the month, as in the fleet-wide trailer summary; no trailer predicate or attribution is applied, and rows whose task is absent from uzdaviniai stay in it and are counted by missingTaskCount.',
 ] as const;
 
 export const emptyFixedCostBucketCounts = (): Record<FixedCostDifferenceBucket, number> =>

@@ -5,13 +5,13 @@ import {
   assertApprovedDeletedRowPolicy, assertDecimalString, emptyFixedCostBucketCounts,
   fixedCostAuthoritativeSource, fixedCostBreakdownSources, fixedCostDeletedStates,
   fixedCostMonetaryLimitations, fixedCostMonetaryMaxRecords, fixedCostMonetaryPendingApprovals,
-  fixedCostTrailerBreakdownSources, fixedCostTrailerMonetaryLimitations,
+  fixedCostTrailerBreakdownSources, fixedCostTrailerFleetMonetaryLimitations, fixedCostTrailerMonetaryLimitations,
   InvalidFixedCostMonetaryQuery, InvalidFixedCostMonetaryResult, parseFixedCostMonetaryQuery, unapprovedFixedCostDeletedRowPolicy,
   type DecimalString, type FixedCostDeletedRowPolicy, type FixedCostDeletedState,
   type FixedCostMonetaryGroup, type FixedCostMonetaryQuery, type FixedCostMonetaryResult,
   type FixedCostMonetaryScope, type FixedCostRepresentation,
 } from './monetary-contract.js';
-import { fixedCostDifferenceBuckets, fixedCostDifferenceLadder } from './reconciliation-contract.js';
+import { fixedCostDifferenceBuckets, fixedCostDifferenceLadder, parseFixedCostReconciliationMonth } from './reconciliation-contract.js';
 
 /**
  * Internal truck fixed-cost monetary repository.
@@ -193,8 +193,10 @@ function buildStatement(
 }
 
 export function fixedCostMonetaryStatement(query: FixedCostMonetaryQuery): string {
-  // The trailer scope always binds exactly one identifier; the truck scope binds its optional allowlist.
-  const placeholders = query.allocationScope === 'trailer' ? 1 : query.truckIds?.length ?? 0;
+  // A parsed trailer query always binds exactly one identifier; only the internal
+  // fleet-wide trailer component read (`trailerFleetComponentsQuery`) binds none.
+  // The truck scope binds its optional allowlist.
+  const placeholders = query.trailerId !== undefined ? 1 : query.truckIds?.length ?? 0;
   return buildStatement(query.allocationScope, query.representation, placeholders, query.limit, query.includeComponents === true);
 }
 
@@ -369,9 +371,10 @@ export async function queryFixedCostMonetaryTotals(
 async function executeMonetaryStatement(
   pool: ReplicaPool, gate: AnalyticsGate, statement: string, query: FixedCostMonetaryQuery,
 ): Promise<Record<string, unknown>[]> {
-  const trailer = query.allocationScope === 'trailer';
   // Identifiers are only ever bound values, never statement text.
-  const values: (string | number)[] = [query.periodMonth, query.periodEnd, ...(trailer ? [query.trailerId!] : query.truckIds ?? [])];
+  const values: (string | number)[] = [
+    query.periodMonth, query.periodEnd, ...(query.trailerId !== undefined ? [query.trailerId] : query.truckIds ?? []),
+  ];
   let rows: Record<string, unknown>[];
   try {
     rows = await gate.run(() => queryReadOnly<Record<string, unknown>[]>(pool, statement, values));
@@ -413,13 +416,14 @@ function monetaryResult(query: FixedCostMonetaryQuery, policy: FixedCostDeletedR
       recordsRead,
       missingTaskCount: groups.reduce((total, group) => total + group.missingTaskCount, 0),
       truckFilterApplied: query.truckIds !== undefined,
-      ...(trailer ? { trailerFilterApplied: true as const } : {}),
+      ...(trailer ? { trailerFilterApplied: query.trailerId !== undefined } : {}),
       truncated: false,
       complete: true,
       deletedRowPolicy: policy,
       reconciliationStatus: 'unreconciled',
       pendingApprovals: fixedCostMonetaryPendingApprovals,
-      limitations: trailer ? fixedCostTrailerMonetaryLimitations : fixedCostMonetaryLimitations,
+      limitations: !trailer ? fixedCostMonetaryLimitations
+        : query.trailerId !== undefined ? fixedCostTrailerMonetaryLimitations : fixedCostTrailerFleetMonetaryLimitations,
     },
   };
 }
@@ -489,6 +493,54 @@ export async function queryFixedCostRankedComponents(
   const query = parseFixedCostMonetaryQuery(input, now);
   assertApprovedDeletedRowPolicy(policy);
   if (query.includeComponents !== true) throw new InvalidFixedCostMonetaryQuery('The component ranking requires component reads');
+  return rankedComponentRead(pool, gate, query, policy);
+}
+
+/**
+ * The only fleet-wide trailer form of the monetary query: locked, every summary row
+ * of the month, component reads on, no trailer predicate and no master check. It is
+ * built here, never parsed, so `parseFixedCostMonetaryQuery` keeps requiring exactly
+ * one trailer identifier and no caller can reach a trailer read without one.
+ *
+ * The population is the fleet-wide trailer summary's (`trailer-fleet-repository.ts`):
+ * every `kastai_fiksuoti_ataskaita` row of the month, `uzdaviniai` LEFT JOINed on its
+ * primary key, ordered by task and bounded identically, so rows without an
+ * attributable trailer stay in it exactly as they stay in the fleet summary amount.
+ */
+export function trailerFleetComponentsQuery(periodMonth: unknown, now?: Date): FixedCostMonetaryQuery {
+  let period;
+  try {
+    period = parseFixedCostReconciliationMonth(periodMonth, now);
+  } catch {
+    throw new InvalidFixedCostMonetaryQuery('A canonical settled YYYY-MM-01 period is required');
+  }
+  return {
+    allocationScope: 'trailer', representation: 'locked', periodMonth: period.month, periodEnd: period.monthEnd,
+    limit: fixedCostMonetaryMaxRecords, includeComponents: true,
+  };
+}
+
+/**
+ * Internal only. The fleet-wide trailer component ranking for one settled month,
+ * through exactly the same statement builder, ranking wrapper, projection, record
+ * bound and truncation rules as `queryFixedCostRankedComponents`. The only bound
+ * values are the two period bounds.
+ */
+export async function queryTrailerFleetRankedComponents(
+  pool: ReplicaPool,
+  gate: AnalyticsGate,
+  periodMonth: unknown,
+  policy: FixedCostDeletedRowPolicy = unapprovedFixedCostDeletedRowPolicy,
+  now?: Date,
+): Promise<FixedCostRankedComponentResult> {
+  const query = trailerFleetComponentsQuery(periodMonth, now);
+  assertApprovedDeletedRowPolicy(policy);
+  return rankedComponentRead(pool, gate, query, policy);
+}
+
+async function rankedComponentRead(
+  pool: ReplicaPool, gate: AnalyticsGate, query: FixedCostMonetaryQuery, policy: FixedCostDeletedRowPolicy,
+): Promise<FixedCostRankedComponentResult> {
   const fields = scopeSources[query.allocationScope].componentFields;
 
   const rows = await executeMonetaryStatement(pool, gate, fixedCostRankedComponentStatement(query), query);
