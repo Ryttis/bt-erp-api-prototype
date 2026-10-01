@@ -541,10 +541,11 @@ test('no public monetary route exists and all fixed-cost endpoints stay unverifi
   app.addHook('onRoute', route => { routes.add(route.url); });
   try {
     await app.ready();
-    assert.ok([...routes].every(path => !/monetary|total|reconcil|component|breakdown-detail/i.test(path)), 'No monetary route');
+    // The truck components route (MP-8) is the one deliberate exception, gated by the truck pilot flag.
+    assert.ok([...routes].filter(path => path !== '/expense-analytics/fixed-costs/components').every(path => !/monetary|total|reconcil|component|breakdown-detail/i.test(path)), 'No monetary route');
     for (const path of [
       '/expense-analytics/fixed-costs/totals', '/expense-analytics/fixed-costs/monetary',
-      '/expense-analytics/fixed-costs/components', '/fixed-costs/totals',
+      '/fixed-costs/totals',
     ]) {
       for (const method of ['GET', 'POST'] as const) assert.equal((await app.inject({ method, url: path })).statusCode, 404, path);
     }
@@ -555,6 +556,9 @@ test('no public monetary route exists and all fixed-cost endpoints stay unverifi
         assert.equal(response.statusCode, 422);
         assert.equal(response.json().error.code, 'SEMANTICS_UNVERIFIED');
       }
+      const components = await app.inject(`/expense-analytics/fixed-costs/components?allocationScope=${scope}&dateFrom=2025-03-01&dateTo=2025-03-31`);
+      assert.equal(components.statusCode, 422);
+      assert.equal(components.json().error.code, 'SEMANTICS_UNVERIFIED');
     }
     assert.equal(calls.length, 0, 'No replica access from public endpoints');
   } finally { await app.close(); }
