@@ -1463,3 +1463,18 @@ Keys are the ERP column names verbatim; no label, translation or grouping is app
 `EXPLAIN`: one index walk of `kastai_fiksuoti_ataskaita` (~1.49 M rows, FC-P17 unchanged), then primary-key (`uzdavinys` prefix) lookups into `kastai_fiksuoti_priekabos_det_locked` (~1.39 M rows) per component.
 
 Still open: FC-06/FC-07 (additivity and residual rule), the large no-detail share (11.5% of 2025-12 tasks carry a stored trailer total but no locked trailer detail row, so their cost is in `authoritativeAmount` but in no component), business labels for the keys, the trailer lock sentinel, FC-03, FC-11, FC-13, FC-P17.
+
+
+## Selected-truck component pilot extension
+
+`GET /expense-analytics/fixed-costs/components` additionally accepts `truckIds=1,2`
+for `allocationScope=truck`: 1–50 distinct positive safe integer IDs, canonicalized
+in ascending order and echoed as `data.truckIds`. Omission retains the existing
+fleet response exactly; trailer requests reject this selector. This does not
+define a current operational fleet. The selected population is the existing
+`uzdaviniai.uzdavinio_masina IN (...)` population; unassignable tasks are excluded.
+
+The existing ranked query sums and orders locked components in SQL DECIMAL in
+one statement. Monthly settlement, full locking, deleted-row treatment, record
+bounds and comparable-detail caveats are unchanged. No category mapping, range
+total, current-fleet semantics or new Finance approval is implied.

@@ -151,7 +151,7 @@ export function pilotIncludedGroup(
   result: FixedCostMonetaryResult,
   representation: FixedCostRepresentation,
   periodMonth: string,
-  truckId?: number,
+  truckId?: number | readonly number[],
 ): FixedCostMonetaryGroup {
   const { meta } = result;
   if (meta.representation !== representation || meta.periodMonth !== periodMonth || meta.allocationScope !== 'truck'
