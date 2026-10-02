@@ -488,3 +488,58 @@ test('authentication is still required', async () => {
     assert.equal(calls.length, 0);
   } finally { await app.close(); }
 });
+
+test('BA selected trucks: one bound SQL ranking over the selected IDs, not per-truck reduction', async () => {
+  await withApp(() => rankedRows(), async (app, calls) => {
+    const response = await app.inject(componentsUrl(`${period}&truckIds=55,11,44,22,33`));
+    assert.equal(response.statusCode, 200);
+    const body = response.json();
+    assert.deepEqual(body.data.truckIds, [11, 22, 33, 44, 55]);
+    assert.deepEqual(body.data.components, defaultOrder.map(([component, amount]) => ({ component, amount })));
+    assert.equal(body.data.authoritativeAmount, '1200.40');
+    assert.equal(body.data.reconciliation.noDetailTaskCount, 1);
+    assert.ok(body.meta.limitations.some((entry: string) => entry.includes('is in truckIds')));
+    assert.ok(!body.meta.limitations.some((entry: string) => entry.includes('remain in the included population')));
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0].values, ['2025-03-01', '2025-04-01', 11, 22, 33, 44, 55]);
+    assert.match(calls[0].sql, /t\.uzdavinio_masina IN \(\?, \?, \?, \?, \?\)/);
+    assert.match(calls[0].sql, /ORDER BY g.deletedState,.*DESC, CAST\(k.component AS BINARY\) ASC/s);
+  });
+});
+
+test('selected truck selector fails closed before SQL, including on trailer scope', async () => {
+  await withApp(() => rankedRows(), async (app, calls) => {
+    for (const extra of ['truckIds=', 'truckIds=0', 'truckIds=01', 'truckIds=1,1', 'truckIds=1,-2', 'truckIds=1.5',
+      'truckIds=9007199254740992', 'truckIds=1&truckIds=2', 'truckIds[]=1', 'truckIds=1%20OR%201=1',
+      `truckIds=${Array.from({ length: 51 }, (_, i) => i + 1).join(',')}`, 'truckIds=1&truckId=1']) {
+      assert.equal((await app.inject(componentsUrl(`${period}&${extra}`))).statusCode, 400, extra);
+    }
+    assert.equal((await app.inject(componentsUrl(`${period.replace('truck', 'trailer')}&truckIds=1`))).statusCode, 400);
+    assert.equal(calls.length, 0);
+  });
+});
+
+test('selected trucks retain monthly locking and completeness refusals', async () => {
+  for (const [rows, code] of [
+    [rankedRows(defaultOrder, { unlocked: 1 }), 'PERIOD_NOT_FULLY_LOCKED'],
+    [rankedRows(defaultOrder, { noDetail: 4 }), 'INCOMPLETE_RESULT'],
+    [[], 'NO_DATA_FOR_PERIOD'],
+  ] as const) {
+    await withApp(() => rows, async (app) => {
+      const response = await app.inject(componentsUrl(`${period}&truckIds=11,22`));
+      assert.equal(response.statusCode, 422);
+      assert.equal(response.json().error.code, code);
+      assert.equal(response.json().data, undefined);
+    });
+  }
+});
+
+test('component projection cannot confuse selected trucks with the whole fleet', async () => {
+  const { pool } = fakePool(() => rankedRows());
+  const { totals, ranking } = await queryFixedCostRankedComponents(pool, new AnalyticsGate(1), {
+    allocationScope: 'truck', representation: 'locked', periodMonth: month,
+    limit: 50000, includeComponents: true, truckIds: [11, 22],
+  }, truckFixedCostPilotDeletedRowPolicy, now);
+  assert.throws(() => projectTruckFixedCostPilotComponents(totals, ranking, month), InvalidFixedCostMonetaryResult);
+  assert.deepEqual(projectTruckFixedCostPilotComponents(totals, ranking, month, undefined, [11, 22]).data.truckIds, [11, 22]);
+});

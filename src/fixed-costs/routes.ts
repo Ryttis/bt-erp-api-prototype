@@ -92,7 +92,7 @@ export async function registerFixedCostRoutes(app: FastifyInstance, options: Fix
     }
   });
 
-  // Fleet-wide component amounts for one month, optionally one exact component of the
+  // Component amounts for one month (optionally selected truckIds), and optionally one exact component of the
   // requested scope. Validated in full before the flag and any replica access; the
   // truck scope resolves only under the truck flag, the trailer scope only under the
   // trailer flag, and every other scope stays disabled.

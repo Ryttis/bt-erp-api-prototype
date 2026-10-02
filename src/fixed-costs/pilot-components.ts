@@ -2,7 +2,7 @@ import type { AnalyticsGate } from '../analytics-gate.js';
 import type { ReplicaPool } from '../db/replica.js';
 import { InvalidFixedCostQuery, parseFixedCostRequest, type FixedCostAllocationScope } from './contracts.js';
 import {
-  fixedCostAuthoritativeSource, fixedCostBreakdownSources, fixedCostMonetaryMaxRecords, InvalidFixedCostMonetaryResult,
+  fixedCostAuthoritativeSource, fixedCostBreakdownSources, fixedCostMonetaryMaxRecords, fixedCostMonetaryMaxTruckIds, InvalidFixedCostMonetaryResult,
   type DecimalString, type FixedCostMonetaryGroup, type FixedCostMonetaryResult,
 } from './monetary-contract.js';
 import {
@@ -12,7 +12,7 @@ import {
 } from './monetary-repository.js';
 import {
   pilotIncludedGroup, resolveTruckFixedCostPilotMonth, truckFixedCostPilotDeletedRowPolicy,
-  truckFixedCostPilotLimitations, TruckFixedCostPilotRefused,
+  truckFixedCostPilotLimitations, truckFixedCostPilotSingleTruckLimitations, TruckFixedCostPilotRefused,
 } from './pilot-summary.js';
 import { orderFixedCostLimitations } from './summary-contract.js';
 
@@ -53,6 +53,11 @@ export const truckFixedCostComponentsLimitations = orderFixedCostLimitations([
   'Components are ordered by the database in DECIMAL by amount descending, then by component key ascending in binary order; zero and negative component amounts are listed unchanged.',
 ]);
 
+const selectedTruckComponentsLimitations = orderFixedCostLimitations([
+  ...truckFixedCostComponentsLimitations.filter(entry => !truckFixedCostPilotLimitations.includes(entry)),
+  ...truckFixedCostPilotSingleTruckLimitations.map(entry => entry.replace('equals truckId', 'is in truckIds')),
+]);
+
 export interface FixedCostComponentsRequest<K extends string = FixedCostComponentField | FixedCostTrailerComponentField> {
   /** Any recognised scope; the route enables only `truck` and `trailer`. */
   allocationScope: FixedCostAllocationScope;
@@ -60,13 +65,15 @@ export interface FixedCostComponentsRequest<K extends string = FixedCostComponen
   dateTo: string;
   /** One exact component key of the requested scope; absent means every component. */
   component?: K;
+  /** Truck scope only: selected task truck IDs, never a current operational fleet definition. */
+  truckIds?: number[];
 }
 
 export type TruckFixedCostComponentsRequest = FixedCostComponentsRequest<FixedCostComponentField>;
 
 /**
- * Exactly `allocationScope`, a paired date range and an optional `component`. No
- * selector, grouping, sorting, paging, representation or field input exists; an
+ * Exactly `allocationScope`, a paired date range, optional `component`, and an
+ * optional truck-only `truckIds` list. No grouping, sorting, paging, representation or field input exists; an
  * unknown, repeated or case-variant component key is rejected.
  *
  * The key must belong to the requested scope's own verified column list: a truck
@@ -74,13 +81,23 @@ export type TruckFixedCostComponentsRequest = FixedCostComponentsRequest<FixedCo
  * without a component source keep the truck list and are then refused by the route.
  */
 export function parseFixedCostComponentsRequest(input: Record<string, unknown>): FixedCostComponentsRequest {
-  const { component, ...rest } = input;
+  const { component, truckIds: rawTruckIds, ...rest } = input;
   const parsed = parseFixedCostRequest(rest);
   if (parsed.dateFrom === undefined || parsed.dateTo === undefined) throw new InvalidFixedCostQuery();
+  let truckIds: number[] | undefined;
+  if (rawTruckIds !== undefined) {
+    if (parsed.allocationScope !== 'truck' || typeof rawTruckIds !== 'string'
+      || !/^[1-9][0-9]*(,[1-9][0-9]*)*$/.test(rawTruckIds)) throw new InvalidFixedCostQuery();
+    truckIds = rawTruckIds.split(',').map(Number);
+    if (truckIds.length > fixedCostMonetaryMaxTruckIds || new Set(truckIds).size !== truckIds.length
+      || truckIds.some(id => !Number.isSafeInteger(id))) throw new InvalidFixedCostQuery();
+    truckIds.sort((a, b) => a - b);
+  }
   const keys: readonly string[] = parsed.allocationScope === 'trailer' ? fixedCostTrailerComponentFields : fixedCostComponentFields;
   if (component !== undefined && (typeof component !== 'string' || !keys.includes(component))) throw new InvalidFixedCostQuery();
   return {
     allocationScope: parsed.allocationScope, dateFrom: parsed.dateFrom, dateTo: parsed.dateTo,
+    ...(truckIds === undefined ? {} : { truckIds }),
     ...(component === undefined ? {} : { component: component as FixedCostComponentField | FixedCostTrailerComponentField }),
   };
 }
@@ -91,6 +108,7 @@ export const parseTruckFixedCostComponentsRequest = parseFixedCostComponentsRequ
 export interface TruckFixedCostPilotComponentsResponse {
   data: {
     allocationScope: 'truck';
+    truckIds?: readonly number[];
     periodMonth: string;
     currency: 'EUR';
     representation: 'locked';
@@ -172,9 +190,10 @@ export function projectTruckFixedCostPilotComponents(
   ranking: readonly FixedCostRankedComponentGroup[],
   periodMonth: string,
   component?: FixedCostComponentField,
+  truckIds?: readonly number[],
 ): TruckFixedCostPilotComponentsResponse {
   // Same population rules, same refusals, same stored total as the fleet-wide summary.
-  const group = pilotIncludedGroup(totals, 'locked', periodMonth);
+  const group = pilotIncludedGroup(totals, 'locked', periodMonth, truckIds);
   if (totals.meta.breakdownSource !== fixedCostBreakdownSources.locked) {
     throw new InvalidFixedCostMonetaryResult('Components were not read from the locked detail table');
   }
@@ -183,6 +202,7 @@ export function projectTruckFixedCostPilotComponents(
   return {
     data: {
       allocationScope: 'truck',
+      ...(truckIds === undefined ? {} : { truckIds }),
       periodMonth,
       currency: 'EUR',
       representation: 'locked',
@@ -215,12 +235,12 @@ export function projectTruckFixedCostPilotComponents(
       reconciliationStatus: 'provisional_unreconciled_erp_reference',
       complete: true,
       pilot: true,
-      limitations: truckFixedCostComponentsLimitations,
+      limitations: truckIds === undefined ? truckFixedCostComponentsLimitations : selectedTruckComponentsLimitations,
     },
   };
 }
 
-/** One locked, fleet-wide ranked read. Period rules run before any gate or replica access. */
+/** One locked ranked read, fleet-wide or filtered to selected trucks. Period rules run before any gate or replica access. */
 export async function runTruckFixedCostPilotComponents(
   pool: ReplicaPool,
   gate: AnalyticsGate,
@@ -230,6 +250,7 @@ export async function runTruckFixedCostPilotComponents(
   const periodMonth = resolveTruckFixedCostPilotMonth(request, now);
   const { totals, ranking } = await queryFixedCostRankedComponents(pool, gate, {
     allocationScope: 'truck', representation: 'locked', periodMonth, limit: fixedCostMonetaryMaxRecords, includeComponents: true,
+    ...(request.truckIds === undefined ? {} : { truckIds: request.truckIds }),
   }, truckFixedCostPilotDeletedRowPolicy, now);
-  return projectTruckFixedCostPilotComponents(totals, ranking, periodMonth, request.component);
+  return projectTruckFixedCostPilotComponents(totals, ranking, periodMonth, request.component, request.truckIds);
 }
