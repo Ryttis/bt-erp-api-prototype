@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Stage deployment. Runs on the stage host: the deploy_stage CI job streams it over
-# SSH (`bash -s`). It automates the documented manual procedure and changes nothing
-# about it: the same checkout, compose files and env file. Never prints secrets.
+# SSH (`bash -s`). Uses tracked Compose files and the server-only runtime env file.
+# Never prints secrets.
 set -Eeuo pipefail
 
 APP_DIR=${APP_DIR:-/var/www/html/bt-erp-replica-api}
@@ -10,13 +10,13 @@ CONTAINER=bt-erp-replica-api-api-1
 COMPOSE=(
     docker compose
     -f compose.yaml
-    -f "$CONFIG_DIR/compose.staging.yaml"
+    -f compose.staging.yaml
     --env-file "$CONFIG_DIR/staging.env"
 )
 
 trap 'echo "Stage deployment failed (line $LINENO)." >&2' ERR
 
-for path in "$CONFIG_DIR/compose.staging.yaml" "$CONFIG_DIR/staging.env"; do
+for path in "$CONFIG_DIR/staging.env"; do
     if [[ ! -r $path ]]; then
         echo "Required staging file is not readable: $path" >&2
         exit 1
@@ -30,6 +30,9 @@ git fetch origin
 git switch master
 git pull --ff-only origin master
 echo "Deploying commit $(git rev-parse --short HEAD): $(git log -1 --format=%s)"
+
+echo "Validating Compose configuration..."
+"${COMPOSE[@]}" config --quiet
 
 echo "Building and starting containers..."
 "${COMPOSE[@]}" up -d --build

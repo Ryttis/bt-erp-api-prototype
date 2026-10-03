@@ -1,0 +1,6 @@
+services:
+  api:
+    restart: unless-stopped
+    # Compose merges this with the localhost binding in compose.yaml.
+    ports:
+      - "10.10.11.29:3000:3000"
