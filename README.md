@@ -377,11 +377,12 @@ summaries but has no fragile timing assertions.
 
 The Docker image is multi-stage, runs as the unprivileged `node` user, and contains
 only production dependencies plus compiled application files. Supply required
-replica variables and `ERP_ANALYTICS_API_TOKEN` through deployment secrets; the
-current Compose file binds the API to loopback only and supplies only PORT, so it
-needs a local environment override before the API can start. Keep its host port
-closed to public networks; expose it to the BT Finance Analyst through a local
-authenticated reverse proxy or a private firewall rule only.
+replica variables and `ERP_ANALYTICS_API_TOKEN` through deployment secrets.
+`compose.yaml` forwards the runtime variables from `.env` or `--env-file`, including
+pilot flags and query limits, and fails before startup if required credentials are
+missing. It binds to localhost. The tracked `compose.staging.yaml` additionally
+binds to `10.10.11.29:3000` for BT Finance Analyst and enables restart after a host
+or Docker restart. Keep this internal address restricted to trusted callers.
 
 ## Stage deployment (GitLab CI)
 
@@ -389,16 +390,37 @@ Pipeline jobs: `test` and `typecheck` run on every branch and merge request;
 `deploy_stage` then `smoke_stage` run only on `master`. There is no production job.
 
 `deploy_stage` streams `scripts/deploy-stage.sh` over SSH to the stage host. It runs
-the manual procedure unchanged: in `/var/www/html/bt-erp-replica-api` it runs
+the following procedure: in `/var/www/html/bt-erp-replica-api` it runs
 `git fetch`, `git switch master`, `git pull --ff-only`, then `docker compose` with
-`compose.yaml`, `~/.config/bt-erp-replica-api/compose.staging.yaml` and
+the tracked `compose.yaml`, `compose.staging.yaml` and
 `--env-file ~/.config/bt-erp-replica-api/staging.env` (`up -d --build`, then `ps`).
 It fails if SSH, git, the build or startup fails, or if `bt-erp-replica-api-api-1`
 does not answer `/health` inside the container within 60 seconds.
 `smoke_stage` runs `scripts/smoke-stage.sh` on the stage host against the published
 API. It requires `GET /health` to return `{"status":"ok"}` and an unauthenticated
 `GET /vehicles` to return 401. It uses no token and never touches the replica.
-The manual commands above still work exactly as before.
+Canonical stage restart/rebuild (from the stage checkout):
+
+```bash
+docker compose --env-file "$HOME/.config/bt-erp-replica-api/staging.env" \
+  -f compose.yaml -f compose.staging.yaml up -d --build api
+```
+
+No `/tmp` override or server-only Compose file is required. Keep the stage env file
+outside the checkout; retain its existing credentials, replica settings and pilot
+flags. `--env-file` supplies Compose interpolation; the explicit `environment`
+mapping forwards those settings into the API container. Container PORT stays 3000
+to match both published ports.
+
+Before restarting, inspect effective ports and environment **names only**:
+
+```bash
+docker compose --env-file "$HOME/.config/bt-erp-replica-api/staging.env" \
+  -f compose.yaml -f compose.staging.yaml config --format json |
+  python3 -c 'import json,sys; s=json.load(sys.stdin)["services"]["api"]; print(json.dumps({"ports":s["ports"],"environment_names":sorted(s["environment"])}, indent=2))'
+```
+
+Never print the unfiltered Compose configuration: it contains credentials.
 
 GitLab CI/CD variables (the same names bt-finance-analyst uses for this host):
 
