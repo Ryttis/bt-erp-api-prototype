@@ -10,6 +10,16 @@ const manufactured = `(CASE WHEN TRIM(m.pag_metai) REGEXP '^[1-9][0-9]{3}$'
   AND TRIM(m.pag_menuo) REGEXP '^[0-9]{1,2}$' AND TRIM(m.pag_diena) REGEXP '^[0-9]{1,2}$'
   THEN CONCAT(TRIM(m.pag_metai), '-', LPAD(TRIM(m.pag_menuo), 2, '0'), '-', LPAD(TRIM(m.pag_diena), 2, '0')) ELSE NULL END)`;
 
+const activeVehicleSql = `(
+  m.nebedirba = 0
+  AND (
+    m.nebedirba_nuo IS NULL
+    OR m.nebedirba_nuo = '0000-00-00'
+    OR m.nebedirba_nuo > CURDATE()
+  )
+  AND m.tipas_apskaitai != 1101
+)`;
+
 const joins = {
   rental: `LEFT JOIN infot_2.masinu_priekabu_naudotojas r ON r.id = (
     SELECT ru.id FROM infot_2.masinu_priekabu_naudotojas ru
@@ -45,7 +55,7 @@ export const vehicleFields = {
   make: field('m.marke_2', 'text'),
   model: field('m.modelis', 'text'),
   vin: field('m.kebulo_nr', 'text'),
-  active: field('(COALESCE(m.nebedirba, 0) = 0)', 'boolean'),
+  active: field(activeVehicleSql, 'boolean'),
   consumer_id: field('NULLIF(r.naudotojas, 0)', 'fk', ['rental']),
   consumer_from: field(validDateSql('CAST(r.data_nuo AS CHAR)'), 'date', ['rental']),
   consumer_to: field(validDateSql('CAST(r.data_iki AS CHAR)'), 'date', ['rental']),
@@ -270,7 +280,7 @@ export const vehicleCategoryFields = {
   group: `CAST(CONVERT(${vehicleFields.group.sql} USING utf8mb4) AS BINARY)`,
   market: `CAST(CONVERT(${vehicleFields.market.sql} USING utf8mb4) AS BINARY)`,
   ownership_status: `CAST(CONVERT(${vehicleFields.ownership_status.sql} USING utf8mb4) AS BINARY)`,
-  active: '(COALESCE(m.nebedirba, 0) = 0)',
+  active: activeVehicleSql,
   consumer_id: 'NULLIF(r.naudotojas, 0)',
   lessor_id: 'NULLIF(l.lizinguotojas, 0)',
   bank_id: 'NULLIF(l.bankas, 0)',

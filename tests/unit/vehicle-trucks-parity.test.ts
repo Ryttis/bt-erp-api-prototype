@@ -154,7 +154,7 @@ test('pagination, empty results and combined old and new filters keep the rows c
     assert.equal(response.statusCode, 200);
     assert.deepEqual(response.json().meta, { page: 2, per_page: 2, total: 5, last_page: 3, sort: { field: 'plate_number', direction: 'asc' } });
     assert.deepEqual(paged.calls[1].values, ['Volvo', 1, '2026-10-24', 'Lizingas', 2, 2]);
-    assert.match(paged.calls[0].sql, /LOWER\(m\.marke_2\) = LOWER\(\?\) AND \(COALESCE\(m\.nebedirba, 0\) = 0\) = \? AND [\s\S]+ AND LOWER\(ost\.pavadinimas\) = LOWER\(\?\)/);
+    assert.match(paged.calls[0].sql, /LOWER\(m\.marke_2\) = LOWER\(\?\) AND \([\s\S]*m\.nebedirba = 0[\s\S]*m\.nebedirba_nuo IS NULL[\s\S]*m\.nebedirba_nuo = '0000-00-00'[\s\S]*m\.nebedirba_nuo > CURDATE\(\)[\s\S]*m\.tipas_apskaitai != 1101[\s\S]*\) = \? AND [\s\S]+ AND LOWER\(ost\.pavadinimas\) = LOWER\(\?\)/);
     assert.equal((await app.inject('/vehicles?per_page=201&status=Nuosava')).statusCode, 400, 'page bound still applies');
   });
   const empty = fixture([], 0);
@@ -229,7 +229,7 @@ test('migrated filters keep authentication, timeout and busy protections', async
 test('representative legacy /plain/mcp/trucks requests translate to equivalent /vehicles requests', async () => {
   const comparisons: { legacy: string; vehicles: string; condition: RegExp; values: unknown[] }[] = [
     { legacy: 'make=Volvo&per_page=3', vehicles: 'make=Volvo&per_page=3', condition: /LOWER\(m\.marke_2\) = LOWER\(\?\)/, values: ['Volvo'] },
-    { legacy: 'active=1', vehicles: 'active=1', condition: /\(COALESCE\(m\.nebedirba, 0\) = 0\) = \?/, values: [1] },
+    { legacy: 'active=1', vehicles: 'active=1', condition: /\([\s\S]*m\.nebedirba = 0[\s\S]*m\.nebedirba_nuo IS NULL[\s\S]*m\.nebedirba_nuo = '0000-00-00'[\s\S]*m\.nebedirba_nuo > CURDATE\(\)[\s\S]*m\.tipas_apskaitai != 1101[\s\S]*\) = \?/, values: [1] },
     { legacy: 'active=0&inactive_since_from=2024-01-01&inactive_since_to=2024-12-31', vehicles: 'active=0&inactive_since_from=2024-01-01&inactive_since_to=2024-12-31', condition: /nebedirba_nuo/, values: [0, '2024-01-01', '2024-12-31'] },
     { legacy: 'status=Nuosava', vehicles: 'ownership_status=Nuosava', condition: /LOWER\(ost\.pavadinimas\) = LOWER\(\?\)/, values: ['Nuosava'] },
     { legacy: 'owner=transline', vehicles: 'owner_name=transline', condition: /LOWER\(oc\.firmos_pavadinimas\) LIKE/, values: ['%transline%'] },
